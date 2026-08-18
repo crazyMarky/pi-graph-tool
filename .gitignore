@@ -1,0 +1,4 @@
+node_modules/
+.pi-agent/auth.json
+*.log
+.DS_Store
