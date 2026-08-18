@@ -1,6 +1,11 @@
 /**
  * pi-graph-tool —— 给 Pi 装上图工程的 Wave 调度能力（R2 改造核心）
  * ====================================================================
+ * v0.1.1（经代码审计修复）：
+ *   ① 重试路径补传 modelOverride（消除参数不一致）
+ *   ② TUI 安全日志：交互模式走 onUpdate 官方通道，仅非 TTY 时 console.log
+ *   ③ 单节点超时兜底（默认 300s，PI_GRAPH_NODE_TIMEOUT_MS 可调）
+ *   ④ 加固：违约节点并行重试；入参护栏（空/超 12 个子任务拒绝）
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
  * 它做什么：
@@ -59,6 +64,11 @@ function lastText(messages) {
 	return "";
 }
 
+// ---- 单节点超时：默认 300s，可用 PI_GRAPH_NODE_TIMEOUT_MS 调整 ----
+// v0.1.1 修复③：防止挂死的 LLM 调用把整个 Wave 拖死。
+// 超时的节点表现为"违约"（输出为空），自动走既有重试机制，无需特殊分支。
+const NODE_TIMEOUT_MS = Number(process.env.PI_GRAPH_NODE_TIMEOUT_MS) || 300_000;
+
 // ---- 单个图节点 = 一个进程内 Pi 子代理 ----
 async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 	const t0 = Date.now();
@@ -67,6 +77,7 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 		cwd: process.cwd(),
 		model: modelOverride ?? resolveModel(),
 		noTools: "all", // 子节点做纯调研，禁工具保安全提速；需要工具的节点可放开
+		// 注意：noTools:"all" 同时禁用了子代理的 graph_run —— 结构上防止无限递归
 	});
 	const agent = session.agent;
 
@@ -74,12 +85,17 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 	const onAbort = () => { try { agent.abort(); } catch {} };
 	signal?.addEventListener("abort", onAbort, { once: true });
 
+	// v0.1.1 修复③：单节点超时兜底
+	let timedOut = false;
+	const timer = setTimeout(() => { timedOut = true; try { agent.abort(); } catch {} }, NODE_TIMEOUT_MS);
+
 	try {
 		await agent.prompt(prompt);
 	} finally {
+		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 	}
-	return { title, text: lastText(session.messages), seconds: (Date.now() - t0) / 1000 };
+	return { title, text: lastText(session.messages), seconds: (Date.now() - t0) / 1000, timedOut };
 }
 
 export default function (pi) {
@@ -105,11 +121,30 @@ export default function (pi) {
 			),
 		}),
 
-		async execute(toolCallId, params, signal) {
+		async execute(toolCallId, params, signal, onUpdate) {
 			const agentDir = resolveAgentDir();
 			const modelOverride = resolveModel();
 			const t0 = Date.now();
-			const log = (m) => console.log(`  [graph_run] ${m}`);
+
+			// v0.1.1 修复②：TUI 安全日志。
+			// 交互模式（TTY）下 console.log 会破坏 Pi 的终端 UI——改走官方流式通道 onUpdate；
+			// 仅在非 TTY（SDK / print / CI）时保留 console.log，方便脚本调试。
+			const log = (m) => {
+				try { onUpdate?.({ content: [], details: { status: m } }); } catch {}
+				if (!process.stdout.isTTY) console.log(`  [graph_run] ${m}`);
+			};
+
+			// v0.1.1 加固：入参护栏（防空/防过猛 fan-out 触发限流）
+			const MAX_SUBTASKS = 12;
+			if (!Array.isArray(params.subtasks) || params.subtasks.length === 0) {
+				return { content: [{ type: "text", text: "graph_run 错误：subtasks 不能为空。" }], details: { error: true } };
+			}
+			if (params.subtasks.length > MAX_SUBTASKS) {
+				return {
+					content: [{ type: "text", text: `graph_run 错误：一次最多 ${MAX_SUBTASKS} 个子任务（当前 ${params.subtasks.length} 个），请拆成多次调用。` }],
+					details: { error: true },
+				};
+			}
 
 			log(`Wave 启动：${params.subtasks.length} 个子代理并行`);
 
@@ -121,38 +156,43 @@ export default function (pi) {
 			// ===== 契约校验：输出非空才算履约；违规节点单独重试（不重跑整层）=====
 			const results = [];
 			const violations = [];
-			settled.forEach((r, i) => {
-				if (r.status === "fulfilled" && r.value.text.length > 20) {
-					results.push(r.value);
-				} else {
-					const reason = r.status === "rejected"
-						? String(r.reason?.message ?? r.reason).slice(0, 100)
-						: "输出为空或过短（契约违规）";
-					log(`⚠️ [${params.subtasks[i].title}] ${reason} → 仅重试该节点`);
-					violations.push({ i, reason });
-				}
-			});
-
-			for (const v of violations) {
-				try {
-					const st = params.subtasks[v.i];
-					const retry = await runSubNode(
-						st.title,
-						st.prompt + "\n\n注意：请直接以文本形式输出你的完整结果。",
-						agentDir,
-						signal,
-					);
-					if (retry.text.length > 20) {
-						retry.retried = true;
-						results.push(retry);
-						log(`✅ [${st.title}] 重试成功`);
+				settled.forEach((r, i) => {
+					if (r.status === "fulfilled" && r.value.text.length > 20) {
+						results.push(r.value);
 					} else {
-						log(`❌ [${st.title}] 重试后仍违约，放弃该节点（不影响其余结果）`);
+						const reason = r.status === "rejected"
+							? String(r.reason?.message ?? r.reason).slice(0, 100)
+							: (r.value?.timedOut
+								? `节点超时（>${Math.round(NODE_TIMEOUT_MS / 1000)}s）`
+								: "输出为空或过短（契约违规）");
+						log(`⚠️ [${params.subtasks[i].title}] ${reason} → 仅重试该节点`);
+						violations.push({ i, reason });
 					}
-				} catch (e) {
-					log(`❌ [${st.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（不影响其余结果）`);
-				}
-			}
+				});
+
+				// v0.1.1 修复①：重试补传 modelOverride（此前靠 runSubNode 内部兜底侥幸生效）
+				// v0.1.1 加固：多个违约节点并行重试（原为串行 for 循环）
+				await Promise.allSettled(violations.map(async (v) => {
+					const st = params.subtasks[v.i];
+					try {
+						const retry = await runSubNode(
+							st.title,
+							st.prompt + "\n\n注意：请直接以文本形式输出你的完整结果。",
+							agentDir,
+							signal,
+							modelOverride,
+						);
+						if (retry.text.length > 20) {
+							retry.retried = true;
+							results.push(retry);
+							log(`✅ [${st.title}] 重试成功`);
+						} else {
+							log(`❌ [${st.title}] 重试后仍违约，放弃该节点（不影响其余结果）`);
+						}
+					} catch (e) {
+						log(`❌ [${st.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（不影响其余结果）`);
+					}
+				}));
 
 			// ===== 聚合返回：轻量引用（每节点截断，防主上下文膨胀）=====
 			const CAP = 1200;
