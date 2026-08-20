@@ -1,6 +1,6 @@
 {
   "name": "pi-graph-tool",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Graph engineering extension for Pi: adds graph_run tool that lets the agent autonomously organize subtasks into a DAG — same-wave parallelism, multi-wave topological scheduling, and node-to-node data routing via {{id}} placeholders (with contract retry and failure cascade).",
   "license": "MIT",
   "type": "module",

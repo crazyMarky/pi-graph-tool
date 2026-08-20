@@ -10,7 +10,11 @@
  * 无关分支不受影响。
  *
  * v0.1 的既有保障全部保留：allSettled 屏障、节点契约 + 隔离重试、
- * 单节点超时兜底、abort 传播、入参护栏、上下文隔离、轻量引用（1200 字截断）。
+ * 单节点超时兜底、abort 传播、入参护栏、上下文隔离、轻量引用。
+ *
+ * v0.2.1 修正截断策略（吸取实测教训：2000 字路由截断丢失 3/4 上游内容，汇总失真）：
+ *   - 数据路由默认全保真（仅留 100k 字符病态护栏，ROUTE_CAP=0 可完全关闭）
+ *   - 回传主上下文放宽到 6000 字符，且可用 PI_GRAPH_OUTPUT_CAP 调整（0 = 不截断）
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -18,10 +22,10 @@
  *   - DAG 声明          → subtasks[].dependsOn（显式边）+ {{id}} 占位符（隐式边）
  *   - 拓扑分层          → Kahn 算法：反复取出"依赖全部就绪"的节点构成一个 Wave
  *   - Fan-out + Barrier → Wave 内 Promise.allSettled（单点崩溃不击穿屏障）
- *   - 节点数据路由      → {{id}} 替换为上游输出（注入侧亦截断，保护子代理上下文）
+ *   - 节点数据路由      → {{id}} 替换为上游输出（默认全保真，仅病态输出截断）
  *   - 失败级联          → 上游非 ok 的节点标记 skipped，不执行、不占 API 配额
  *   - 节点契约          → 非空文本（>20 字符）；违约只重跑该节点，不重跑整波
- *   - 轻量引用          → 每节点回传截断至 1200 字符，保护主上下文窗口
+ *   - 轻量引用          → 每节点回传默认截断至 6000 字符（可调），保护主上下文窗口
  *   - 上下文隔离        → 每节点独立 Pi 子代理会话，token 不进主上下文
  */
 
@@ -63,9 +67,17 @@ function lastText(messages) {
 }
 
 // ---- 可调参数（环境变量）----
-const NODE_TIMEOUT_MS = Number(process.env.PI_GRAPH_NODE_TIMEOUT_MS) || 300_000; // 单节点超时
-const ROUTE_CAP = Number(process.env.PI_GRAPH_ROUTE_CAP) || 2000; // 单个上游输出注入下游时的截断长度
-const OUTPUT_CAP = 1200; // 单节点结果回传主上下文的截断长度
+function intEnv(name, fallback) {
+	const v = Number(process.env[name]);
+	return Number.isFinite(v) && v >= 0 ? v : fallback;
+}
+const NODE_TIMEOUT_MS = intEnv("PI_GRAPH_NODE_TIMEOUT_MS", 300_000); // 单节点超时
+// 数据路由默认全保真：下游子代理的上下文是隔离且全新的，其职责就是消费上游输出，
+// 截断会破坏流水线语义。ROUTE_CAP 仅作为病态输出的护栏（如上游跑飞输出几十万字）。
+const ROUTE_CAP = intEnv("PI_GRAPH_ROUTE_CAP", 100_000); // 注入时单个上游输出的截断长度；0 = 不截断
+// 回传主上下文保持轻量引用，但默认放宽到 6000 字符（主 agent 需要足够信息回应用户）；
+// 节点多、主上下文紧张时可调小，0 = 不截断。
+const OUTPUT_CAP = intEnv("PI_GRAPH_OUTPUT_CAP", 6_000);
 const MAX_SUBTASKS = 12; // 入参护栏：防过猛 fan-out 触发限流
 const MIN_OUTPUT_CHARS = 20; // 节点契约：输出至少 20 字符才算履约
 
@@ -135,7 +147,7 @@ function renderPrompt(node, byId) {
 	return node.prompt.replace(PLACEHOLDER_RE, (whole, ref) => {
 		const up = byId.get(ref);
 		if (!up || up.status !== "ok") return whole;
-		const body = up.result.text.length > ROUTE_CAP
+		const body = ROUTE_CAP > 0 && up.result.text.length > ROUTE_CAP
 			? up.result.text.slice(0, ROUTE_CAP) + `\n…（已截断，原 ${up.result.text.length} 字）`
 			: up.result.text;
 		return `\n<<< 上游节点 "${up.title}"（${ref}）的输出 >>>\n${body}\n<<< 结束 >>>\n`;
@@ -308,7 +320,7 @@ export default function (pi) {
 				sections.push(`—— Wave ${w + 1} ——`);
 				for (const n of waves[w]) {
 					if (n.status === "ok") {
-						const body = n.result.text.length > OUTPUT_CAP
+						const body = OUTPUT_CAP > 0 && n.result.text.length > OUTPUT_CAP
 							? n.result.text.slice(0, OUTPUT_CAP) + `\n…（已截断，原 ${n.result.text.length} 字）`
 							: n.result.text;
 						sections.push(`### ${n.title}${n.result.retried ? "（重试后成功）" : ""}\n${body}`);
