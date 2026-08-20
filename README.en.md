@@ -103,7 +103,7 @@ graph_run({ subtasks })
    │
    ▼
 ③ Aggregate & return
-   └─ Grouped by wave, each node truncated to 1200 chars into the main context (lightweight reference)
+   └─ Grouped by wave, each node truncated into the main context (lightweight reference, default 6000 chars, configurable)
 ```
 
 ### Graph engineering concepts mapped to code
@@ -113,11 +113,11 @@ graph_run({ subtasks })
 | DAG declaration (nodes + edges) | `subtasks[].dependsOn` explicit edges + `{{id}}` placeholder implicit edges |
 | Topological layering (Wave scheduling) | Kahn's algorithm, repeatedly extracting ready nodes |
 | Fan-out + Barrier | `Promise.allSettled` within each wave |
-| Node-to-node data routing | `{{id}}` → upstream output injection (`ROUTE_CAP` truncation protects sub-agent context) |
+| Node-to-node data routing | `{{id}}` → upstream output injection (full fidelity by default, cap only guards pathological outputs) |
 | Failure cascade | Upstream not ok → all descendants marked skipped |
 | Node contract | >20 chars of output; violation retries that node only, never the whole wave |
-| Lightweight reference | Per-node return truncated to 1200 chars, protects main context window |
-| Context isolation | Independent sub-agent session per node; tokens never enter main context |
+| Lightweight reference | Per-node return truncated to 6000 chars by default (`PI_GRAPH_OUTPUT_CAP`, 0 = no cap) |
+| Context isolation | Independent sub-agent session per node (in-memory, never written to disk, never pollutes the `pi --resume` session list); tokens never enter main context |
 | Recursion guard | Sub-agents run with `noTools: "all"` — structurally cannot call graph_run |
 
 ### Environment variables
@@ -125,8 +125,11 @@ graph_run({ subtasks })
 | Variable | Default | Description |
 |---|---|---|
 | `PI_GRAPH_NODE_TIMEOUT_MS` | `300000` | Per-node timeout in ms; a timeout counts as a contract violation |
-| `PI_GRAPH_ROUTE_CAP` | `2000` | Truncation length per upstream output when injected into a downstream prompt |
+| `PI_GRAPH_ROUTE_CAP` | `100000` | Truncation length per upstream output injected downstream. Full fidelity by default — the cap only guards pathological runaway outputs; `0` = no cap |
+| `PI_GRAPH_OUTPUT_CAP` | `6000` | Truncation length per node result returned to the main context; `0` = no cap |
 | `PI_GRAPH_MODEL_JSON` | — | Full Model object JSON overriding the sub-agent model |
+
+> On truncation: **routing (upstream → downstream) is full-fidelity by default** — the downstream sub-agent's context is isolated and fresh, and truncating its inputs directly corrupts pipeline semantics. **Return to main context** stays a lightweight reference (protecting the main conversation window), relaxed to 6000 chars by default; lower it or set 0 if many nodes strain the main context. The better way to control information volume is constraining output length in node prompts (e.g. "output a ~300-word summary").
 
 Model resolution priority: `PI_GRAPH_MODEL_JSON` → project `.pi-agent/` → global `~/.pi/agent` (follows whatever model and keys you normally use; zero hardcoding).
 
@@ -146,6 +149,18 @@ Multi-wave pipelines (like the 3+1 shape above) gain additionally: the compariso
 - The LLM chooses the wave structure autonomously when it detects dependencies (a feature); force it with "use graph_run"
 - Recommend ≤12 subtasks per call (rate-limit guard; more is rejected)
 - Verified on GLM-4.5; Claude/OpenAI theoretically compatible (zero hardcoding) but untested
+
+## Benchmark (reproduce it yourself)
+
+The `bench/` directory ships an A/B script: serial (single session, one task at a time — the no-extension equivalent) vs graph-style (replicating this extension's wave fan-out + data routing):
+
+```bash
+cd bench
+npm install
+node bench.mjs
+```
+
+It prints total times, the speedup, and one key diagnostic — **the slowest Wave-1 node**: if it approaches "serial per-task time × task count", your account/model is being queued server-side and parallel gains approach zero; if it stays near the per-task time, the concurrency is real. Reference (GLM-4.5, small tasks): 1.63x speedup, slowest Wave-1 node 4.2s vs 3.4s serial per-task.
 
 ## License
 
