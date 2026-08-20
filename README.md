@@ -1,34 +1,41 @@
 # pi-graph-tool
 
-**Graph engineering for [Pi](https://pi.dev) — let your agent parallelize independent subtasks autonomously.**
+[English](./README.en.md) | **简体中文**
 
-为 [Pi Coding Agent](https://pi.dev) 装上图工程并行能力：当对话中包含多个**互不依赖**的子任务时，Pi 会自动调用 `graph_run` 工具，把子任务分给多个并行子代理同时执行，全部完成后汇总结果。
+**面向 [Pi](https://pi.dev) 的图工程扩展：让 Agent 自主把子任务组织成 DAG——同波并行、跨波按依赖执行、节点间数据路由。**
 
 ```
-你说：  "帮我调研 A、B、C 三件事，然后汇总给我"
-Pi 做：  识别 A/B/C 互不依赖 → 3 个子代理并行执行 → 汇总返回
+你说：  "帮我调研 React、Vue、Svelte 三个框架，然后对比汇总给我"
+
+Pi 做：  graph_run 提交 4 节点 DAG
+              React ┐
+              Vue   ├──（并行 Wave 1）──→ 对比汇总（Wave 2，引用三份调研结果）
+              Svelte┘
 ```
 
-**实测收益**（智谱 GLM-4.5，真实可复现）：
+## v0.2 新增：完整的 DAG 能力
 
-| 规模 | 串行 | 并行 | 加速比 |
-|------|:---:|:---:|:---:|
-| 3 个子任务 | 57-60s | 40s | **1.44x** |
-| 6 个子任务 | 117s | 53s | **2.20x** |
+v0.1 只能并行"互不依赖"的任务（一层、零条边的退化图）。v0.2 补齐三块核心能力：
 
----
+| 能力 | 用法 | 说明 |
+|---|---|---|
+| **依赖声明** | `dependsOn: ["react", "vue"]` | 声明边；扩展做校验与环检测 |
+| **多 Wave 调度** | 自动 | Kahn 拓扑分层，同波并行、波间屏障，自动推进 |
+| **节点间数据路由** | prompt 中写 `{{react}}` | 运行前替换为上游节点输出；忘声明依赖会自动推断隐式边 |
 
-## Install / 安装
+另有 DAG 特有的**失败语义**：节点重试仍违约 → 其所有后代级联跳过（skipped），无关分支不受影响。
+
+## 安装
 
 ```bash
-# from this repo / 从本仓库安装
+# 从本仓库安装
 pi install git:github.com/crazyMarky/pi-graph-tool
 
-# or from npm (after publish) / 或发布 npm 后
+# 或 npm 发布后
 pi install npm:pi-graph-tool
 ```
 
-Manual / 手动安装：
+手动安装：
 
 ```bash
 mkdir -p .pi/extensions
@@ -36,37 +43,109 @@ cp -r pi-graph-tool .pi/extensions/    # 项目级（推荐）
 # 或拷到 ~/.pi/agent/extensions/ 全局生效
 ```
 
-## Verify / 验证安装
-
-Three levels / 三级验证：
+## 验证安装
 
 1. **存在性**：启动 `pi`，问它 *"你有哪些工具？graph_run 是干什么的？"*
-2. **行为性**：提出多任务请求，终端出现 `[graph_run] Wave 启动：N 个子代理并行` 日志
-3. **效果性**：同一批任务，串行 vs 并行对照计时（3 任务约 1.4x）
+2. **行为性**：提出"调研 A、B、C 再汇总"，终端出现 `[graph_run] 图规划完成：4 个节点 / 2 个 Wave / 3 条边` 日志
+3. **效果性**：同一批任务串行 vs DAG 对照计时
 
-## How it works / 工作原理
+## 参数协议
 
-- Registers a `graph_run` tool; the **main LLM decides** when subtasks are independent and calls it
-- Sub-agents run in-process via Pi SDK, each with an isolated session context
-- `Promise.allSettled` → single-node failure never kills the wave
-- Contract check (non-empty output) → violating node retried once, in isolation
-- Results truncated to 1200 chars per node (lightweight reference, protects main context)
+`graph_run` 接收一个 `subtasks` 数组，每个元素是一个 DAG 节点：
 
-Concepts mapped to code / 图工程概念与代码对照：
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `id` | 否 | 节点唯一短 id（如 `"react"`）；省略时默认 `n1`、`n2`…。`dependsOn` 和 `{{id}}` 都引用它 |
+| `title` | 是 | 子任务短名，用于结果展示 |
+| `prompt` | 是 | 给该子代理的完整独立指令（需自包含背景）。可含 `{{id}}` 占位符，运行前替换为上游输出 |
+| `dependsOn` | 否 | 依赖的上游节点 id 数组；上游全部成功后本节点才执行 |
 
-| Concept 概念 | Implementation 实现 |
+示例——三路调研 + 一路汇总：
+
+```json
+{
+  "subtasks": [
+    { "id": "react",  "title": "调研 React",  "prompt": "调研 React 最新生态：核心特性、优势、风险，输出 300 字左右摘要。" },
+    { "id": "vue",    "title": "调研 Vue",    "prompt": "调研 Vue 最新生态：核心特性、优势、风险，输出 300 字左右摘要。" },
+    { "id": "svelte", "title": "调研 Svelte", "prompt": "调研 Svelte 最新生态：核心特性、优势、风险，输出 300 字左右摘要。" },
+    {
+      "id": "compare",
+      "title": "对比汇总",
+      "prompt": "以下是三个前端框架的调研结果，请横向对比并给出选型建议：\nReact：{{react}}\nVue：{{vue}}\nSvelte：{{svelte}}",
+      "dependsOn": ["react", "vue", "svelte"]
+    }
+  ]
+}
+```
+
+执行形态：Wave 1 = React/Vue/Svelte 三路并行 → 全部履约 → Wave 2 = 汇总节点拿到三份注入的调研结果。
+
+省略全部 `dependsOn` 时退化为 v0.1 的单波并行——完全向后兼容。
+
+## 工作原理
+
+```
+graph_run({ subtasks })
+   │
+   ▼
+① 图规划
+   ├─ id 归一与查重、dependsOn 引用校验（未知 id / 自依赖即报错）
+   ├─ 隐式边推断：prompt 引用了 {{id}} 却没声明依赖 → 自动补边
+   └─ Kahn 拓扑分层成 Wave（发现环 → 报错让 LLM 修正后重新调用）
+   │
+   ▼
+② Wave 主循环（w = 1..N）
+   ├─ 失败级联：上游未成功的节点 → skipped（传递性，不浪费 API 配额）
+   ├─ Fan-out：本波节点各起一个进程内 Pi 子代理（独立会话上下文）
+   │          prompt 中的 {{id}} 已替换为上游输出（数据路由，带截断）
+   ├─ Barrier：Promise.allSettled 等本波全部落定（单点崩溃不击穿屏障）
+   └─ 契约校验：违约节点（空输出 / 崩溃 / 超时）单独隔离重试一次
+   │
+   ▼
+③ 聚合返回
+   └─ 按 Wave 分组、每节点截断 1200 字符回传主上下文（轻量引用）
+```
+
+### 图工程概念与代码对照
+
+| 图工程概念 | 实现 |
 |---|---|
-| Fan-out + Barrier | `Promise.allSettled` |
-| Node contract 节点契约 | non-empty check + single-node retry |
-| Lightweight reference 轻量引用 | 1200-char truncation |
-| Context isolation 上下文隔离 | per-node independent session |
+| DAG 声明（节点 + 边） | `subtasks[].dependsOn` 显式边 + `{{id}}` 占位符隐式边 |
+| 拓扑分层（Wave 调度） | Kahn 算法反复取出"依赖就绪"的节点 |
+| Fan-out + Barrier | Wave 内 `Promise.allSettled` |
+| 节点间数据路由 | `{{id}}` → 上游输出注入（`ROUTE_CAP` 截断保护子代理上下文） |
+| 失败级联 | 上游非 ok → 所有后代标记 skipped |
+| 节点契约 | 输出 >20 字符；违约只重跑该节点，不重跑整波 |
+| 轻量引用 | 每节点回传截断至 1200 字符，保护主上下文窗口 |
+| 上下文隔离 | 每节点独立子代理会话，token 不进主上下文 |
+| 递归防护 | 子代理 `noTools: "all"`，结构上无法再调 graph_run |
 
-## Limitations / 限制（如实说明）
+### 环境变量
 
-- Sub-agents are pure-LLM (no tools) — suited for research/generation/comparison tasks
-- The LLM may choose **not** to parallelize when it detects dependencies (a feature); force with "用 graph_run"
-- Recommend ≤ 8 subtasks per call (API rate limits)
-- Verified on GLM-4.5; Claude/OpenAI theoretically compatible (zero hardcoding) but not yet tested — you can be the first
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `PI_GRAPH_NODE_TIMEOUT_MS` | `300000` | 单节点超时（毫秒），超时按违约处理 |
+| `PI_GRAPH_ROUTE_CAP` | `2000` | 注入下游 prompt 时，单个上游输出的截断长度 |
+| `PI_GRAPH_MODEL_JSON` | — | 完整 Model 对象 JSON，覆盖子代理模型 |
+
+模型解析优先级：`PI_GRAPH_MODEL_JSON` → 项目 `.pi-agent/` → 全局 `~/.pi/agent`（跟随你平时用的模型与密钥，零硬编码）。
+
+## 实测收益（v0.1 并行基准，智谱 GLM-4.5）
+
+| 规模 | 串行 | 并行 | 加速比 |
+|------|:---:|:---:|:---:|
+| 3 个子任务 | 57-60s | 40s | **1.44x** |
+| 6 个子任务 | 117s | 53s | **2.20x** |
+
+多 Wave 流水线（如上面的 3+1 结构）额外收益来自：汇总节点不再空等串行队列，而是在三路调研落定后立即带上下文启动。
+
+## 限制（如实说明）
+
+- 子代理是纯 LLM（无工具）——适合调研 / 生成 / 对比类任务；需要工具的节点需放开 `noTools`
+- 波间是屏障语义：Wave 2 必须等 Wave 1 全部落定——这是保证依赖就绪的代价，也是 DAG 调度的标准行为
+- LLM 检测到依赖关系时会自主选择分波结构（特性）；可用"用 graph_run"强制
+- 建议单次 ≤12 个子任务（API 限流护栏，超出会被拒绝）
+- GLM-4.5 实测；Claude / OpenAI 理论兼容（零硬编码）但未测
 
 ## License
 

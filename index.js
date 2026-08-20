@@ -1,29 +1,28 @@
 /**
- * pi-graph-tool —— 给 Pi 装上图工程的 Wave 调度能力（R2 改造核心）
+ * pi-graph-tool —— 给 Pi 装上真正的 DAG 图工程能力（v0.2）
  * ====================================================================
- * v0.1.1（经代码审计修复）：
- *   ① 重试路径补传 modelOverride（消除参数不一致）
- *   ② TUI 安全日志：交互模式走 onUpdate 官方通道，仅非 TTY 时 console.log
- *   ③ 单节点超时兜底（默认 300s，PI_GRAPH_NODE_TIMEOUT_MS 可调）
- *   ④ 加固：违约节点并行重试；入参护栏（空/超 12 个子任务拒绝）
+ * v0.2 在 v0.1 单波并行的基础上补齐三块图工程核心能力：
+ *   ① 依赖声明   —— 子任务可声明 dependsOn（边），扩展负责校验与环检测
+ *   ② 多 Wave    —— Kahn 拓扑分层，同层并行、层间屏障，自动按波次推进
+ *   ③ 数据路由   —— prompt 中的 {{id}} 占位符在运行前替换为上游节点输出；
+ *                   引用了某节点却忘声明依赖时，自动推断隐式边
+ * 另有 DAG 特有的失败语义：节点重试后仍违约 → 其所有后代级联跳过（skip），
+ * 无关分支不受影响。
+ *
+ * v0.1 的既有保障全部保留：allSettled 屏障、节点契约 + 隔离重试、
+ * 单节点超时兜底、abort 传播、入参护栏、上下文隔离、轻量引用（1200 字截断）。
+ *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
- * 它做什么：
- *   注册一个 graph_run 工具。主 agent（LLM）判断出若干子任务【互不依赖】时，
- *   主动调用它 → 扩展在同一进程内并行拉起 N 个 Pi 子代理（Wave 调度）→
- *   全部落定后做契约校验（空输出/崩溃的节点单独重试一次）→
- *   聚合各节点摘要返回主上下文（轻量引用，防上下文膨胀）。
- *
- * 与 R1（graph.mjs）的本质区别：
- *   R1：我的外部脚本编排 Pi —— 图在 Pi 外面
- *   R2：Pi 自己长出图能力 —— LLM 在对话中自主决定何时并行（图在 Pi 里面）
- *
  * 图工程概念落地对照：
- *   - Fan-out 并行      → Promise.allSettled（不是 all：单点崩溃不击穿屏障）
- *   - Barrier           → await 全部落定后才聚合
- *   - 节点契约          → 非空文本；违规只重跑该节点，不重跑整层
- *   - 轻量引用          → 每节点输出截断后回传，保护主上下文窗口
- *   - 上下文隔离        → 子代理独立会话窗口，token 不进主上下文
+ *   - DAG 声明          → subtasks[].dependsOn（显式边）+ {{id}} 占位符（隐式边）
+ *   - 拓扑分层          → Kahn 算法：反复取出"依赖全部就绪"的节点构成一个 Wave
+ *   - Fan-out + Barrier → Wave 内 Promise.allSettled（单点崩溃不击穿屏障）
+ *   - 节点数据路由      → {{id}} 替换为上游输出（注入侧亦截断，保护子代理上下文）
+ *   - 失败级联          → 上游非 ok 的节点标记 skipped，不执行、不占 API 配额
+ *   - 节点契约          → 非空文本（>20 字符）；违约只重跑该节点，不重跑整波
+ *   - 轻量引用          → 每节点回传截断至 1200 字符，保护主上下文窗口
+ *   - 上下文隔离        → 每节点独立 Pi 子代理会话，token 不进主上下文
  */
 
 import { createAgentSession } from "@earendil-works/pi-coding-agent";
@@ -34,9 +33,8 @@ import * as path from "node:path";
 // ---- 模型解析：环境自适应，零硬编码 ----
 // 优先级：
 //   1. 环境变量 PI_GRAPH_MODEL_JSON（完整 Model 对象 JSON，高级用法）
-//   2. 项目本地 .pi-agent/（有 models.json + auth.json 就用它，如我们的 GLM 环境）
+//   2. 项目本地 .pi-agent/（有就让它接管认证）
 //   3. 都没有 → 用使用者自己的全局 Pi 配置（~/.pi/agent，即他们平时用的模型）
-// 这样任何人装上扩展即可用，子代理自动跟随他自己的模型与密钥。
 function resolveModel() {
 	if (process.env.PI_GRAPH_MODEL_JSON) {
 		try { return JSON.parse(process.env.PI_GRAPH_MODEL_JSON); } catch {}
@@ -64,10 +62,85 @@ function lastText(messages) {
 	return "";
 }
 
-// ---- 单节点超时：默认 300s，可用 PI_GRAPH_NODE_TIMEOUT_MS 调整 ----
-// v0.1.1 修复③：防止挂死的 LLM 调用把整个 Wave 拖死。
-// 超时的节点表现为"违约"（输出为空），自动走既有重试机制，无需特殊分支。
-const NODE_TIMEOUT_MS = Number(process.env.PI_GRAPH_NODE_TIMEOUT_MS) || 300_000;
+// ---- 可调参数（环境变量）----
+const NODE_TIMEOUT_MS = Number(process.env.PI_GRAPH_NODE_TIMEOUT_MS) || 300_000; // 单节点超时
+const ROUTE_CAP = Number(process.env.PI_GRAPH_ROUTE_CAP) || 2000; // 单个上游输出注入下游时的截断长度
+const OUTPUT_CAP = 1200; // 单节点结果回传主上下文的截断长度
+const MAX_SUBTASKS = 12; // 入参护栏：防过猛 fan-out 触发限流
+const MIN_OUTPUT_CHARS = 20; // 节点契约：输出至少 20 字符才算履约
+
+// {{id}} 占位符：匹配 {{ research }} / {{n1}} 等；未命中任何节点 id 时原样保留
+const PLACEHOLDER_RE = /\{\{\s*([^{}\s]+)\s*\}\}/g;
+
+// ---- 图规划：id 归一、边校验、隐式边推断、Kahn 拓扑分层 ----
+// 返回 { nodes, byId, waves }；发现结构性问题直接 throw（由 execute 捕获后回报 LLM）
+function planGraph(raw, log) {
+	const nodes = raw.map((st, i) => ({
+		id: String(st.id ?? `n${i + 1}`).trim(),
+		title: String(st.title ?? `任务${i + 1}`),
+		prompt: String(st.prompt ?? ""),
+		dependsOn: [...new Set((st.dependsOn ?? []).map((d) => String(d).trim()).filter(Boolean))],
+		status: "pending", // pending → ok | failed | skipped
+		result: null,
+		wave: -1,
+	}));
+	const byId = new Map(nodes.map((n) => [n.id, n]));
+
+	const dup = nodes.find((n, i) => nodes.findIndex((m) => m.id === n.id) !== i);
+	if (dup) throw new Error(`存在重复的节点 id "${dup.id}"，每个节点的 id 必须唯一。`);
+
+	for (const n of nodes) {
+		for (const d of n.dependsOn) {
+			if (!byId.has(d)) {
+				throw new Error(`节点 "${n.id}" 的 dependsOn 引用了不存在的 id "${d}"。合法 id：${[...byId.keys()].join(", ")}。`);
+			}
+			if (d === n.id) throw new Error(`节点 "${n.id}" 不能依赖它自己。`);
+		}
+	}
+
+	// 隐式边推断：prompt 里引用了 {{id}} 却没声明依赖 → 自动补边（LLM 常忘写 dependsOn）
+	for (const n of nodes) {
+		for (const m of n.prompt.matchAll(PLACEHOLDER_RE)) {
+			const ref = m[1];
+			if (byId.has(ref) && ref !== n.id && !n.dependsOn.includes(ref)) {
+				n.dependsOn.push(ref);
+				log(`边推断："${n.id}" 的 prompt 引用了 {{${ref}}} → 自动补充依赖边`);
+			}
+		}
+	}
+
+	// Kahn 分层：反复取出"依赖全部完成"的节点 → 同属一个 Wave
+	// 取不出任何节点 = 剩下的节点互相成环
+	const waves = [];
+	const done = new Set();
+	const remaining = new Set(nodes);
+	while (remaining.size > 0) {
+		const wave = [...remaining].filter((n) => n.dependsOn.every((d) => done.has(d)));
+		if (wave.length === 0) {
+			throw new Error(`检测到依赖环，涉及节点：${[...remaining].map((n) => n.id).join("、")}。请调整 dependsOn 打破循环。`);
+		}
+		for (const n of wave) {
+			n.wave = waves.length;
+			remaining.delete(n);
+			done.add(n.id);
+		}
+		waves.push(wave);
+	}
+	return { nodes, byId, waves };
+}
+
+// ---- 数据路由：把 {{id}} 替换为上游节点输出（带定界符与截断，防子代理上下文膨胀）----
+// 未解析的占位符（引用不存在/未成功的节点）原样保留
+function renderPrompt(node, byId) {
+	return node.prompt.replace(PLACEHOLDER_RE, (whole, ref) => {
+		const up = byId.get(ref);
+		if (!up || up.status !== "ok") return whole;
+		const body = up.result.text.length > ROUTE_CAP
+			? up.result.text.slice(0, ROUTE_CAP) + `\n…（已截断，原 ${up.result.text.length} 字）`
+			: up.result.text;
+		return `\n<<< 上游节点 "${up.title}"（${ref}）的输出 >>>\n${body}\n<<< 结束 >>>\n`;
+	});
+}
 
 // ---- 单个图节点 = 一个进程内 Pi 子代理 ----
 async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
@@ -85,7 +158,7 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 	const onAbort = () => { try { agent.abort(); } catch {} };
 	signal?.addEventListener("abort", onAbort, { once: true });
 
-	// v0.1.1 修复③：单节点超时兜底
+	// 单节点超时兜底：超时的节点表现为"违约"，自动走既有重试机制，无需特殊分支
 	let timedOut = false;
 	const timer = setTimeout(() => { timedOut = true; try { agent.abort(); } catch {} }, NODE_TIMEOUT_MS);
 
@@ -101,23 +174,27 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 export default function (pi) {
 	pi.registerTool({
 		name: "graph_run",
-		label: "Graph Run（并行图调度）",
+		label: "Graph Run（DAG 图调度）",
 		description:
-			"并行执行多个互不依赖的子任务（图工程 Wave 调度）。" +
-			"每个子任务在一个独立的 Pi 子代理中运行，全部完成后聚合各节点结果。" +
-			"适用于：多角度调研、批量生成、独立验证等可并行场景。" +
-			"注意：只把【互不依赖】的子任务放进来；有依赖关系的任务应分多次调用。",
-		promptSnippet: "graph_run: 并行执行互不依赖的子任务（Wave 调度）",
+			"把多个子任务组成 DAG 并行/分波执行（图工程 Wave 调度）。" +
+			"每个子任务在一个独立的 Pi 子代理中运行；互不依赖的节点同波并行，" +
+			"有依赖的节点通过 dependsOn 声明，等上游完成后在下一波执行；" +
+			"prompt 中的 {{id}} 占位符会被替换为对应上游节点的输出（节点间数据路由）。" +
+			"适用于：多角度调研、流水线式加工（先拆解→再各自展开→最后汇总）、批量生成、独立验证等。" +
+			"注意：依赖关系必须无环；只把相关的子任务放进同一次调用。",
+		promptSnippet: "graph_run: 把子任务组成 DAG，同波并行、跨波按依赖执行，支持 {{id}} 数据路由",
 		promptGuidelines: [
-			"当待办的子任务互不依赖时，用一次 graph_run 并行完成，而不是逐个串行处理",
+			"当待办子任务较多时，用一次 graph_run 组成 DAG 完成：无依赖的节点省略 dependsOn（同波并行），后置步骤用 dependsOn 声明依赖并在 prompt 中用 {{上游id}} 引用其输出",
 		],
 		parameters: Type.Object({
 			subtasks: Type.Array(
 				Type.Object({
-					title: Type.String({ description: "子任务短名（如 '概念调研'）" }),
-					prompt: Type.String({ description: "给该子代理的完整独立指令，需自包含背景" }),
+					id: Type.Optional(Type.String({ description: "节点唯一短 id（如 'search'）。省略时默认为 n1、n2…；dependsOn 与 {{id}} 引用它" })),
+					title: Type.String({ description: "子任务短名（如 '概念调研'），用于结果展示" }),
+					prompt: Type.String({ description: "给该子代理的完整独立指令，需自包含背景。可包含 {{id}} 占位符，运行前会被替换为该上游节点的输出（自动补充对应依赖边）" }),
+					dependsOn: Type.Optional(Type.Array(Type.String({ description: "本节点依赖的上游节点 id 列表；这些节点成功后本节点才会执行" }))),
 				}),
-				{ description: "互不依赖的子任务列表（建议 2-8 个）" },
+				{ description: "组成 DAG 的子任务列表（建议 2-12 个）。依赖必须无环" },
 			),
 		}),
 
@@ -126,16 +203,13 @@ export default function (pi) {
 			const modelOverride = resolveModel();
 			const t0 = Date.now();
 
-			// v0.1.1 修复②：TUI 安全日志。
-			// 交互模式（TTY）下 console.log 会破坏 Pi 的终端 UI——改走官方流式通道 onUpdate；
-			// 仅在非 TTY（SDK / print / CI）时保留 console.log，方便脚本调试。
+			// TUI 安全日志：交互模式走 onUpdate 官方通道；仅非 TTY（SDK/CI）时 console.log
 			const log = (m) => {
 				try { onUpdate?.({ content: [], details: { status: m } }); } catch {}
 				if (!process.stdout.isTTY) console.log(`  [graph_run] ${m}`);
 			};
 
-			// v0.1.1 加固：入参护栏（防空/防过猛 fan-out 触发限流）
-			const MAX_SUBTASKS = 12;
+			// 入参护栏
 			if (!Array.isArray(params.subtasks) || params.subtasks.length === 0) {
 				return { content: [{ type: "text", text: "graph_run 错误：subtasks 不能为空。" }], details: { error: true } };
 			}
@@ -146,80 +220,133 @@ export default function (pi) {
 				};
 			}
 
-			log(`Wave 启动：${params.subtasks.length} 个子代理并行`);
+			// 图规划：校验 + 隐式边 + 拓扑分层（失败回报 LLM，让它修正后重试调用）
+			let plan;
+			try {
+				plan = planGraph(params.subtasks, log);
+			} catch (e) {
+				return { content: [{ type: "text", text: `graph_run 错误：${e.message}` }], details: { error: true } };
+			}
+			const { nodes, byId, waves } = plan;
 
-			// ===== Fan-out + Barrier：allSettled（对比 Promise.all 的单点击穿问题）=====
-			const settled = await Promise.allSettled(
-				params.subtasks.map((st) => runSubNode(st.title, st.prompt, agentDir, signal, modelOverride)),
-			);
+			log(`图规划完成：${nodes.length} 个节点 / ${waves.length} 个 Wave / ${nodes.reduce((s, n) => s + n.dependsOn.length, 0)} 条边`);
 
-			// ===== 契约校验：输出非空才算履约；违规节点单独重试（不重跑整层）=====
-			const results = [];
-			const violations = [];
+			const violationsTotal = [];
+
+			// ===== 多 Wave 主循环：波内 fan-out + allSettled 屏障，波间按拓扑序推进 =====
+			for (let w = 0; w < waves.length; w++) {
+				// 失败级联：上游非 ok（失败或被跳过）的节点标记 skipped，本波不执行
+				for (const n of waves[w]) {
+					const bad = n.dependsOn.filter((d) => byId.get(d).status !== "ok");
+					if (bad.length > 0) {
+						n.status = "skipped";
+						n.skipReason = `上游 ${bad.join("、")} 未成功`;
+						log(`⏭️ [${n.title}] 跳过：${n.skipReason}`);
+					}
+				}
+				const batch = waves[w].filter((n) => n.status === "pending");
+				if (batch.length === 0) continue;
+
+				log(`Wave ${w + 1}/${waves.length} 启动：${batch.length} 个子代理并行`);
+				const settled = await Promise.allSettled(
+					batch.map((n) => runSubNode(n.title, renderPrompt(n, byId), agentDir, signal, modelOverride)),
+				);
+
+				// 契约校验：输出达标才算履约；违约节点单独重试（不重跑整波）
+				const violations = [];
 				settled.forEach((r, i) => {
-					if (r.status === "fulfilled" && r.value.text.length > 20) {
-						results.push(r.value);
+					const n = batch[i];
+					if (r.status === "fulfilled" && r.value.text.length > MIN_OUTPUT_CHARS) {
+						n.status = "ok";
+						n.result = r.value;
 					} else {
 						const reason = r.status === "rejected"
 							? String(r.reason?.message ?? r.reason).slice(0, 100)
 							: (r.value?.timedOut
 								? `节点超时（>${Math.round(NODE_TIMEOUT_MS / 1000)}s）`
 								: "输出为空或过短（契约违规）");
-						log(`⚠️ [${params.subtasks[i].title}] ${reason} → 仅重试该节点`);
-						violations.push({ i, reason });
+						log(`⚠️ [${n.title}] ${reason} → 仅重试该节点`);
+						violations.push({ n, reason });
 					}
 				});
+				violationsTotal.push(...violations.map((v) => ({ id: v.n.id, title: v.n.title, reason: v.reason })));
 
-				// v0.1.1 修复①：重试补传 modelOverride（此前靠 runSubNode 内部兜底侥幸生效）
-				// v0.1.1 加固：多个违约节点并行重试（原为串行 for 循环）
-				await Promise.allSettled(violations.map(async (v) => {
-					const st = params.subtasks[v.i];
+				// 违约节点并行隔离重试一次；仍失败则标记 failed（其后代将在后续波中级联跳过）
+				await Promise.allSettled(violations.map(async ({ n }) => {
 					try {
 						const retry = await runSubNode(
-							st.title,
-							st.prompt + "\n\n注意：请直接以文本形式输出你的完整结果。",
+							n.title,
+							renderPrompt(n, byId) + "\n\n注意：请直接以文本形式输出你的完整结果。",
 							agentDir,
 							signal,
 							modelOverride,
 						);
-						if (retry.text.length > 20) {
+						if (retry.text.length > MIN_OUTPUT_CHARS) {
 							retry.retried = true;
-							results.push(retry);
-							log(`✅ [${st.title}] 重试成功`);
+							n.status = "ok";
+							n.result = retry;
+							log(`✅ [${n.title}] 重试成功`);
 						} else {
-							log(`❌ [${st.title}] 重试后仍违约，放弃该节点（不影响其余结果）`);
+							n.status = "failed";
+							log(`❌ [${n.title}] 重试后仍违约，放弃该节点（其后代将被跳过，不影响其他分支）`);
 						}
 					} catch (e) {
-						log(`❌ [${st.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（不影响其余结果）`);
+						n.status = "failed";
+						log(`❌ [${n.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（其后代将被跳过，不影响其他分支）`);
 					}
 				}));
+			}
 
-			// ===== 聚合返回：轻量引用（每节点截断，防主上下文膨胀）=====
-			const CAP = 1200;
-			const sections = results.map((r) => {
-				const body = r.text.length > CAP
-					? r.text.slice(0, CAP) + `\n…（已截断，原 ${r.text.length} 字）`
-					: r.text;
-				return `### ${r.title}${r.retried ? "（重试后成功）" : ""}\n${body}`;
-			});
+			// ===== 聚合返回：按 Wave 分组 + 轻量引用（每节点截断，防主上下文膨胀）=====
+			const okCount = nodes.filter((n) => n.status === "ok").length;
+			const skippedCount = nodes.filter((n) => n.status === "skipped").length;
+			const failedCount = nodes.filter((n) => n.status === "failed").length;
 			const waveSeconds = (Date.now() - t0) / 1000;
 
+			const sections = [];
+			for (let w = 0; w < waves.length; w++) {
+				sections.push(`—— Wave ${w + 1} ——`);
+				for (const n of waves[w]) {
+					if (n.status === "ok") {
+						const body = n.result.text.length > OUTPUT_CAP
+							? n.result.text.slice(0, OUTPUT_CAP) + `\n…（已截断，原 ${n.result.text.length} 字）`
+							: n.result.text;
+						sections.push(`### ${n.title}${n.result.retried ? "（重试后成功）" : ""}\n${body}`);
+					} else if (n.status === "skipped") {
+						sections.push(`### ${n.title} —— 已跳过（${n.skipReason}）`);
+					} else {
+						sections.push(`### ${n.title} —— 失败（重试后仍未履行契约）`);
+					}
+				}
+			}
+
 			const summary =
-				`graph_run 完成：${results.length}/${params.subtasks.length} 个节点成功` +
-				`（并行耗时 ${waveSeconds.toFixed(1)}s；失败重试 ${violations.length} 个）\n\n` +
+				`graph_run 完成：${okCount}/${nodes.length} 个节点成功` +
+				`（${waves.length} 个 Wave，并行耗时 ${waveSeconds.toFixed(1)}s` +
+				`${violationsTotal.length ? `；违约重试 ${violationsTotal.length} 个` : ""}` +
+				`${skippedCount ? `；级联跳过 ${skippedCount} 个` : ""}` +
+				`${failedCount ? `；最终失败 ${failedCount} 个` : ""}）\n\n` +
 				sections.join("\n\n");
 
-			log(`Wave 完成：${results.length}/${params.subtasks.length} 成功，${waveSeconds.toFixed(1)}s`);
+			log(`图执行完成：${okCount}/${nodes.length} 成功，${waves.length} Wave，${waveSeconds.toFixed(1)}s`);
 
 			return {
 				content: [{ type: "text", text: summary }],
 				details: {
-					nodes: results.map((r) => ({
-						title: r.title, seconds: Number(r.seconds.toFixed(1)),
-						chars: r.text.length, retried: !!r.retried,
+					waves: waves.map((wave) => wave.map((n) => n.id)),
+					edges: nodes.flatMap((n) => n.dependsOn.map((d) => ({ from: d, to: n.id }))),
+					nodes: nodes.map((n) => ({
+						id: n.id,
+						title: n.title,
+						wave: n.wave + 1,
+						status: n.status,
+						seconds: n.status === "ok" ? Number(n.result.seconds.toFixed(1)) : undefined,
+						chars: n.status === "ok" ? n.result.text.length : undefined,
+						retried: !!(n.status === "ok" && n.result.retried),
+						skipReason: n.skipReason,
 					})),
 					waveSeconds: Number(waveSeconds.toFixed(1)),
-					violations,
+					violations: violationsTotal,
 				},
 			};
 		},

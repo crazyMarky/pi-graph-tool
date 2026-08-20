@@ -1,7 +1,7 @@
 {
   "name": "pi-graph-tool",
-  "version": "0.1.1",
-  "description": "Graph engineering extension for Pi: adds graph_run tool that lets the agent autonomously fan out independent subtasks into parallel sub-agents (Wave scheduling with contract retry).",
+  "version": "0.2.0",
+  "description": "Graph engineering extension for Pi: adds graph_run tool that lets the agent autonomously organize subtasks into a DAG — same-wave parallelism, multi-wave topological scheduling, and node-to-node data routing via {{id}} placeholders (with contract retry and failure cascade).",
   "license": "MIT",
   "type": "module",
   "main": "index.js",
@@ -9,8 +9,10 @@
     "pi",
     "pi-extension",
     "graph-engineering",
+    "dag",
     "multi-agent",
-    "parallel"
+    "parallel",
+    "wave-scheduling"
   ],
   "pi": {
     "extensions": [
