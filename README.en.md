@@ -150,6 +150,18 @@ Multi-wave pipelines (like the 3+1 shape above) gain additionally: the compariso
 - Recommend ≤12 subtasks per call (rate-limit guard; more is rejected)
 - Verified on GLM-4.5; Claude/OpenAI theoretically compatible (zero hardcoding) but untested
 
+## Benchmark (reproduce it yourself)
+
+The `bench/` directory ships an A/B script: serial (single session, one task at a time — the no-extension equivalent) vs graph-style (replicating this extension's wave fan-out + data routing):
+
+```bash
+cd bench
+npm install
+node bench.mjs
+```
+
+It prints total times, the speedup, and one key diagnostic — **the slowest Wave-1 node**: if it approaches "serial per-task time × task count", your account/model is being queued server-side and parallel gains approach zero; if it stays near the per-task time, the concurrency is real. Reference (GLM-4.5, small tasks): 1.63x speedup, slowest Wave-1 node 4.2s vs 3.4s serial per-task.
+
 ## License
 
 [MIT](./LICENSE)

@@ -1,0 +1,12 @@
+{
+  "name": "pi-graph-bench",
+  "private": true,
+  "version": "0.2.2",
+  "type": "module",
+  "scripts": {
+    "bench": "node bench.mjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.2"
+  }
+}
