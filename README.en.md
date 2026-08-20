@@ -142,6 +142,18 @@ Model resolution priority: `PI_GRAPH_MODEL_JSON` → project `.pi-agent/` → gl
 
 Multi-wave pipelines (like the 3+1 shape above) gain additionally: the comparison node no longer waits in a serial queue — it starts with full context the moment the research wave settles.
 
+## When NOT to use it (stated honestly)
+
+graph_run is not a universal speedup. Its time model is `slowest node + subsequent waves + fixed overhead`; the gain depends on **how heavy each subtask is**:
+
+| Scenario | Use it? | Why |
+|---|---|---|
+| Knowledge-synthesis Q&A ("compare/research a few concepts", within the model's own knowledge) | ❌ Answer directly | Measured: ~15s direct vs ~150s via graph_run. Building a graph inflates one generation into N long documents plus a merge — a 10x pessimization |
+| Every subtask is heavy (deep research reports, long-form generation, independent verification; tens of seconds serially each) | ✅ Significant gains | See the benchmark below |
+| Many subtasks with long intermediate results that would blow up the main context | ✅ Isolation pays off | Context isolation + lightweight references |
+
+As of v0.2.3 the tool's description and promptGuidelines explicitly steer the main model: **answer directly what you can answer; only build graphs for heavy work**. If it still parallelizes a lightweight question, just say "answer directly, don't use graph_run".
+
 ## Limitations (stated honestly)
 
 - Sub-agents are pure LLM (no tools) — suited to research / generation / comparison; nodes needing tools must opt out of `noTools`
