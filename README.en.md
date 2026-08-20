@@ -117,7 +117,7 @@ graph_run({ subtasks })
 | Failure cascade | Upstream not ok → all descendants marked skipped |
 | Node contract | >20 chars of output; violation retries that node only, never the whole wave |
 | Lightweight reference | Per-node return truncated to 6000 chars by default (`PI_GRAPH_OUTPUT_CAP`, 0 = no cap) |
-| Context isolation | Independent sub-agent session per node; tokens never enter main context |
+| Context isolation | Independent sub-agent session per node (in-memory, never written to disk, never pollutes the `pi --resume` session list); tokens never enter main context |
 | Recursion guard | Sub-agents run with `noTools: "all"` — structurally cannot call graph_run |
 
 ### Environment variables

@@ -15,6 +15,12 @@
  * v0.2.1 修正截断策略（吸取实测教训：2000 字路由截断丢失 3/4 上游内容，汇总失真）：
  *   - 数据路由默认全保真（仅留 100k 字符病态护栏，ROUTE_CAP=0 可完全关闭）
  *   - 回传主上下文放宽到 6000 字符，且可用 PI_GRAPH_OUTPUT_CAP 调整（0 = 不截断）
+ * v0.2.2 默认体验修复（面向"装上即用"的大多数用户）：
+ *   - 子代理会话改为纯内存（SessionManager.inMemory）——不再把一次性会话写进
+ *     用户的会话列表，`pi --resume` 选择器不被 graph_run 的子代理垃圾淹没
+ *   - 中止语义：用户 abort 后，剩余波次不再启动、违约节点不再重试、
+ *     未执行节点统一标记 skipped 后正常聚合返回
+ *   - 空 prompt 在规划期快速拒绝（此前要浪费 2 次 LLM 调用才失败）
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -29,7 +35,7 @@
  *   - 上下文隔离        → 每节点独立 Pi 子代理会话，token 不进主上下文
  */
 
-import { createAgentSession } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, SessionManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -101,6 +107,9 @@ function planGraph(raw, log) {
 	const dup = nodes.find((n, i) => nodes.findIndex((m) => m.id === n.id) !== i);
 	if (dup) throw new Error(`存在重复的节点 id "${dup.id}"，每个节点的 id 必须唯一。`);
 
+	const empty = nodes.find((n) => !n.prompt.trim());
+	if (empty) throw new Error(`节点 "${empty.id}"（${empty.title}）的 prompt 为空，每个子任务都需要完整独立的指令。`);
+
 	for (const n of nodes) {
 		for (const d of n.dependsOn) {
 			if (!byId.has(d)) {
@@ -161,6 +170,7 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 		agentDir,
 		cwd: process.cwd(),
 		model: modelOverride ?? resolveModel(),
+		sessionManager: SessionManager.inMemory(), // 子代理会话纯内存：不落盘、不污染用户的会话列表
 		noTools: "all", // 子节点做纯调研，禁工具保安全提速；需要工具的节点可放开
 		// 注意：noTools:"all" 同时禁用了子代理的 graph_run —— 结构上防止无限递归
 	});
@@ -247,6 +257,17 @@ export default function (pi) {
 
 			// ===== 多 Wave 主循环：波内 fan-out + allSettled 屏障，波间按拓扑序推进 =====
 			for (let w = 0; w < waves.length; w++) {
+				// 用户中止：剩余节点全部跳过，立即收尾（不再拉起新的子代理）
+				if (signal?.aborted) {
+					for (const n of nodes) {
+						if (n.status === "pending") {
+							n.status = "skipped";
+							n.skipReason = "调用已被用户中止";
+						}
+					}
+					log("检测到中止信号：跳过所有剩余节点");
+					break;
+				}
 				// 失败级联：上游非 ok（失败或被跳过）的节点标记 skipped，本波不执行
 				for (const n of waves[w]) {
 					const bad = n.dependsOn.filter((d) => byId.get(d).status !== "ok");
@@ -284,7 +305,9 @@ export default function (pi) {
 				violationsTotal.push(...violations.map((v) => ({ id: v.n.id, title: v.n.title, reason: v.reason })));
 
 				// 违约节点并行隔离重试一次；仍失败则标记 failed（其后代将在后续波中级联跳过）
-				await Promise.allSettled(violations.map(async ({ n }) => {
+				// （中止后不再重试——重试等于无视用户的中止指令拉起新子代理）
+				const toRetry = signal?.aborted ? [] : violations;
+				await Promise.allSettled(toRetry.map(async ({ n }) => {
 					try {
 						const retry = await runSubNode(
 							n.title,
@@ -307,6 +330,14 @@ export default function (pi) {
 						log(`❌ [${n.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（其后代将被跳过，不影响其他分支）`);
 					}
 				}));
+			}
+
+			// 收尾清扫：中止等边界情况下仍为 pending 的节点统一标记为 skipped
+			for (const n of nodes) {
+				if (n.status === "pending") {
+					n.status = "skipped";
+					n.skipReason = n.skipReason ?? "调用已被用户中止";
+				}
 			}
 
 			// ===== 聚合返回：按 Wave 分组 + 轻量引用（每节点截断，防主上下文膨胀）=====
