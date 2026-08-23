@@ -21,6 +21,17 @@
  *   - 中止语义：用户 abort 后，剩余波次不再启动、违约节点不再重试、
  *     未执行节点统一标记 skipped 后正常聚合返回
  *   - 空 prompt 在规划期快速拒绝（此前要浪费 2 次 LLM 调用才失败）
+ * v0.2.3 节点档案（三个全局常量升级为每节点可覆盖，修复组内测评 F3）：
+ *   - subtasks[].tools    —— 工具白名单（如 ["read","bash"]）：默认无工具不变，声明后
+ *                            该子代理获得指定工具；graph_run 被结构性排除（白名单不含
+ *                            + excludeTools 双保险），递归防护不弱于全禁方案
+ *   - subtasks[].workdir  —— 工具节点的独立工作目录（防并行 write/bash 互相踩踏）
+ *   - subtasks[].minOutputChars —— 契约阈值每节点可调（默认 20；简短任务设 0 豁免），
+ *                            全局默认可用 PI_GRAPH_MIN_OUTPUT_CHARS 调整
+ *   - subtasks[].outputCap     —— 回传截断每节点可调（默认 6000）
+ *   - 重试语义软化：阈值只触发"一次挽回机会"，重试后【非空即接受】——
+ *                            简洁但合法的输出不再被误杀（F3：视觉 QA 4/6 误判违约）
+ *   设计原则：全局 env 退为默认值，任务异构性由每节点档案表达
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -85,7 +96,10 @@ const ROUTE_CAP = intEnv("PI_GRAPH_ROUTE_CAP", 100_000); // 注入时单个上�
 // 节点多、主上下文紧张时可调小，0 = 不截断。
 const OUTPUT_CAP = intEnv("PI_GRAPH_OUTPUT_CAP", 6_000);
 const MAX_SUBTASKS = 12; // 入参护栏：防过猛 fan-out 触发限流
-const MIN_OUTPUT_CHARS = 20; // 节点契约：输出至少 20 字符才算履约
+// v0.2.3：契约阈值可配置（F3 修复）——长度是启发式不是法律：
+//   阈值只用来触发"一次挽回机会"（重试），重试后只要非空即接受，不再据此丢弃节点。
+//   视觉判定/是否类等天然简短的任务，按节点设 minOutputChars: 0 即豁免。
+const MIN_OUTPUT_CHARS = intEnv("PI_GRAPH_MIN_OUTPUT_CHARS", 20);
 
 // {{id}} 占位符：匹配 {{ research }} / {{n1}} 等；未命中任何节点 id 时原样保留
 const PLACEHOLDER_RE = /\{\{\s*([^{}\s]+)\s*\}\}/g;
@@ -98,6 +112,11 @@ function planGraph(raw, log) {
 		title: String(st.title ?? `任务${i + 1}`),
 		prompt: String(st.prompt ?? ""),
 		dependsOn: [...new Set((st.dependsOn ?? []).map((d) => String(d).trim()).filter(Boolean))],
+		// ---- v0.2.3 节点档案：全局 env 为默认值，每节点可按需覆盖（F3 修复 + 工具白名单）----
+		tools: Array.isArray(st.tools) ? [...new Set(st.tools.map((t) => String(t).trim()).filter(Boolean))] : undefined,
+		minOutputChars: Number.isFinite(st.minOutputChars) && st.minOutputChars >= 0 ? Math.floor(st.minOutputChars) : undefined,
+		outputCap: Number.isFinite(st.outputCap) && st.outputCap >= 0 ? Math.floor(st.outputCap) : undefined,
+		workdir: typeof st.workdir === "string" && st.workdir.trim() ? st.workdir.trim() : undefined,
 		status: "pending", // pending → ok | failed | skipped
 		result: null,
 		wave: -1,
@@ -164,16 +183,28 @@ function renderPrompt(node, byId) {
 }
 
 // ---- 单个图节点 = 一个进程内 Pi 子代理 ----
-async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
+// v0.2.3：节点档案驱动的工具策略——
+//   默认（无 tools）：noTools:"all"，纯 LLM 调研，快且省 token（上下文经济学优势）
+//   声明 tools 白名单：只启用列出的工具（如 read/bash），graph_run 被结构性排除——
+//     双保险：白名单不含它 + excludeTools 显式禁用，递归防护不弱于全禁方案
+//   声明 workdir：工具节点在独立目录工作，避免并行 write/bash 互相踩踏
+async function runSubNode(node, prompt, agentDir, signal, modelOverride) {
 	const t0 = Date.now();
-	const { session } = await createAgentSession({
+	const sessionOpts = {
 		agentDir,
-		cwd: process.cwd(),
 		model: modelOverride ?? resolveModel(),
 		sessionManager: SessionManager.inMemory(), // 子代理会话纯内存：不落盘、不污染用户的会话列表
-		noTools: "all", // 子节点做纯调研，禁工具保安全提速；需要工具的节点可放开
-		// 注意：noTools:"all" 同时禁用了子代理的 graph_run —— 结构上防止无限递归
-	});
+	};
+	if (node.tools && node.tools.length > 0) {
+		sessionOpts.cwd = node.workdir ? path.join(process.cwd(), node.workdir) : process.cwd();
+		if (node.workdir) fs.mkdirSync(sessionOpts.cwd, { recursive: true });
+		sessionOpts.tools = node.tools; // 白名单：只启用列出的工具
+		sessionOpts.excludeTools = ["graph_run"]; // 结构性递归防护（即使白名单误含 graph_run 也被剔除）
+	} else {
+		sessionOpts.cwd = process.cwd();
+		sessionOpts.noTools = "all"; // 默认纯调研：禁工具保安全提速
+	}
+	const { session } = await createAgentSession(sessionOpts);
 	const agent = session.agent;
 
 	// 中止传播：主工具调用被 abort 时，杀掉子代理
@@ -190,7 +221,7 @@ async function runSubNode(title, prompt, agentDir, signal, modelOverride) {
 		clearTimeout(timer);
 		signal?.removeEventListener("abort", onAbort);
 	}
-	return { title, text: lastText(session.messages), seconds: (Date.now() - t0) / 1000, timedOut };
+	return { title: node.title, text: lastText(session.messages), seconds: (Date.now() - t0) / 1000, timedOut };
 }
 
 export default function (pi) {
@@ -202,6 +233,8 @@ export default function (pi) {
 			"每个子任务在一个独立的 Pi 子代理中运行；互不依赖的节点同波并行，" +
 			"有依赖的节点通过 dependsOn 声明，等上游完成后在下一波执行；" +
 			"prompt 中的 {{id}} 占位符会被替换为对应上游节点的输出（节点间数据路由）。" +
+			"每节点可选档案：tools 声明工具白名单（如 [\"read\",\"bash\"]，graph_run 永不可用）；" +
+			"minOutputChars 调契约阈值（视觉判定/是否类简短任务设 0）；outputCap 调回传截断；workdir 给工具节点独立工作目录。" +
 			"适用于：多角度调研、流水线式加工（先拆解→再各自展开→最后汇总）、批量生成、独立验证等。" +
 			"注意：依赖关系必须无环；只把相关的子任务放进同一次调用。",
 		promptSnippet: "graph_run: 把子任务组成 DAG，同波并行、跨波按依赖执行，支持 {{id}} 数据路由",
@@ -215,6 +248,10 @@ export default function (pi) {
 					title: Type.String({ description: "子任务短名（如 '概念调研'），用于结果展示" }),
 					prompt: Type.String({ description: "给该子代理的完整独立指令，需自包含背景。可包含 {{id}} 占位符，运行前会被替换为该上游节点的输出（自动补充对应依赖边）" }),
 					dependsOn: Type.Optional(Type.Array(Type.String({ description: "本节点依赖的上游节点 id 列表；这些节点成功后本节点才会执行" }))),
+					tools: Type.Optional(Type.Array(Type.String({ description: "该子代理可用的工具白名单（如 [\"read\",\"bash\"]）。省略 = 纯 LLM 无工具（默认，快且省 token）；需要读文件/执行命令的节点才声明。graph_run 永远不可用（防递归）" }))),
+					minOutputChars: Type.Optional(Type.Integer({ minimum: 0, description: "该节点的最小输出字符数（默认 20，全局可用 PI_GRAPH_MIN_OUTPUT_CHARS 调）。视觉判定/是否类等天然简短的任务设 0 豁免。注意：阈值只触发一次挽回重试，重试后非空即接受，不会丢弃节点" })),
+					outputCap: Type.Optional(Type.Integer({ minimum: 0, description: "该节点结果回传主上下文的截断字符数（默认 6000，全局可用 PI_GRAPH_OUTPUT_CAP 调）；0 = 不截断。汇总/长报告节点可调大，QA/判定节点可调小" })),
+					workdir: Type.Optional(Type.String({ description: "该子代理的工作目录（相对当前目录，如 \"nodes/research\"）。声明了 tools 的节点建议设置，避免并行工具节点互相踩踏文件" })),
 				}),
 				{ description: "组成 DAG 的子任务列表（建议 2-12 个）。依赖必须无环" },
 			),
@@ -280,16 +317,18 @@ export default function (pi) {
 				const batch = waves[w].filter((n) => n.status === "pending");
 				if (batch.length === 0) continue;
 
-				log(`Wave ${w + 1}/${waves.length} 启动：${batch.length} 个子代理并行`);
+				log(`Wave ${w + 1}/${waves.length} 启动：${batch.length} 个子代理并行` +
+					(batch.some((n) => n.tools?.length) ? `（含工具节点：${batch.filter((n) => n.tools?.length).map((n) => `${n.id}[${n.tools.join("/")}]`).join("、")}）` : ""));
 				const settled = await Promise.allSettled(
-					batch.map((n) => runSubNode(n.title, renderPrompt(n, byId), agentDir, signal, modelOverride)),
+					batch.map((n) => runSubNode(n, renderPrompt(n, byId), agentDir, signal, modelOverride)),
 				);
 
-				// 契约校验：输出达标才算履约；违约节点单独重试（不重跑整波）
+				// 契约校验：输出超过（节点阈值 ?? 全局阈值）才算首过履约；否则单独重试（不重跑整波）
 				const violations = [];
 				settled.forEach((r, i) => {
 					const n = batch[i];
-					if (r.status === "fulfilled" && r.value.text.length > MIN_OUTPUT_CHARS) {
+					const minChars = n.minOutputChars ?? MIN_OUTPUT_CHARS;
+					if (r.status === "fulfilled" && r.value.text.length > minChars) {
 						n.status = "ok";
 						n.result = r.value;
 					} else {
@@ -297,33 +336,35 @@ export default function (pi) {
 							? String(r.reason?.message ?? r.reason).slice(0, 100)
 							: (r.value?.timedOut
 								? `节点超时（>${Math.round(NODE_TIMEOUT_MS / 1000)}s）`
-								: "输出为空或过短（契约违规）");
+								: `输出为空或过短（实际 ${r.value?.text?.length ?? 0} 字 / 阈值 ${minChars}，触发一次挽回重试）`);
 						log(`⚠️ [${n.title}] ${reason} → 仅重试该节点`);
-						violations.push({ n, reason });
+						violations.push({ n, reason, firstText: r.status === "fulfilled" ? (r.value?.text ?? "") : "" });
 					}
 				});
 				violationsTotal.push(...violations.map((v) => ({ id: v.n.id, title: v.n.title, reason: v.reason })));
 
-				// 违约节点并行隔离重试一次；仍失败则标记 failed（其后代将在后续波中级联跳过）
+				// 违约节点并行隔离重试一次。v0.2.3 自适应挽回策略（实测教训：对"只回复两个字"类
+				// prompt 追加"输出完整结果"会自相矛盾，把模型逼成空输出）：
+				//   首答为空   → 轻推一句让它开口（不提"完整"，避免与简洁类任务冲突）
+				//   首答非空但短 → 用【原题】重试（不改写指令），从两次结果中打捞较长者
+				// 接受准则：两次中有任一非空即 ok——阈值只负责触发挽回机会，不丢弃节点（F3）。
 				// （中止后不再重试——重试等于无视用户的中止指令拉起新子代理）
 				const toRetry = signal?.aborted ? [] : violations;
-				await Promise.allSettled(toRetry.map(async ({ n }) => {
+				await Promise.allSettled(toRetry.map(async ({ n, firstText }) => {
 					try {
-						const retry = await runSubNode(
-							n.title,
-							renderPrompt(n, byId) + "\n\n注意：请直接以文本形式输出你的完整结果。",
-							agentDir,
-							signal,
-							modelOverride,
-						);
-						if (retry.text.length > MIN_OUTPUT_CHARS) {
+						const nudge = firstText.trim() ? "" : "\n\n注意：请直接以文本形式输出你的回答。";
+						const retry = await runSubNode(n, renderPrompt(n, byId) + nudge, agentDir, signal, modelOverride);
+						const candidates = [retry.text, firstText].filter((t) => t && t.trim().length > 0);
+						if (candidates.length > 0) {
+							const best = candidates.reduce((a, b) => (b.length > a.length ? b : a));
+							retry.text = best;
 							retry.retried = true;
 							n.status = "ok";
 							n.result = retry;
-							log(`✅ [${n.title}] 重试成功`);
+							log(`✅ [${n.title}] 重试挽回成功${best === firstText ? "（沿用首答）" : ""}`);
 						} else {
 							n.status = "failed";
-							log(`❌ [${n.title}] 重试后仍违约，放弃该节点（其后代将被跳过，不影响其他分支）`);
+							log(`❌ [${n.title}] 两次尝试均无有效输出，放弃该节点（其后代将被跳过，不影响其他分支）`);
 						}
 					} catch (e) {
 						n.status = "failed";
@@ -349,12 +390,14 @@ export default function (pi) {
 			const sections = [];
 			for (let w = 0; w < waves.length; w++) {
 				sections.push(`—— Wave ${w + 1} ——`);
-				for (const n of waves[w]) {
-					if (n.status === "ok") {
-						const body = OUTPUT_CAP > 0 && n.result.text.length > OUTPUT_CAP
-							? n.result.text.slice(0, OUTPUT_CAP) + `\n…（已截断，原 ${n.result.text.length} 字）`
-							: n.result.text;
-						sections.push(`### ${n.title}${n.result.retried ? "（重试后成功）" : ""}\n${body}`);
+			for (const n of waves[w]) {
+				if (n.status === "ok") {
+					// v0.2.3：截断阈值按节点生效（n.outputCap ?? 全局 OUTPUT_CAP）；0 = 该节点不截断
+					const cap = n.outputCap ?? OUTPUT_CAP;
+					const body = cap > 0 && n.result.text.length > cap
+						? n.result.text.slice(0, cap) + `\n…（已截断，原 ${n.result.text.length} 字）`
+						: n.result.text;
+					sections.push(`### ${n.title}${n.result.retried ? "（重试后成功）" : ""}\n${body}`);
 					} else if (n.status === "skipped") {
 						sections.push(`### ${n.title} —— 已跳过（${n.skipReason}）`);
 					} else {
