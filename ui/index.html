@@ -6,69 +6,47 @@
 <title>pi-graph-tool · Wave 调度可视化</title>
 <style>
 	:root {
-		--bg: #0b1220; --panel: #101a2e; --panel2: #0d1526;
-		--line: #1e293b; --txt: #e2e8f0; --dim: #94a3b8; --faint: #64748b;
-		--blue: #3b82f6; --green: #10b981; --amber: #f59e0b; --red: #ef4444; --slate: #64748b;
+		--bg: #0a0f1c; --panel: #101a2e; --panel2: #0c1424;
+		--line: #1c2942; --txt: #e2e8f0; --dim: #94a3b8; --faint: #64748b;
+		--blue: #3b82f6; --green: #10b981; --amber: #f59e0b; --red: #ef4444; --violet: #8b5cf6;
 	}
 	* { box-sizing: border-box; margin: 0; }
 	html, body { height: 100%; }
-	body {
-		background: var(--bg); color: var(--txt);
-		font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-		display: flex; flex-direction: column;
-	}
-	header {
-		display: flex; align-items: center; gap: 14px; padding: 10px 18px;
-		background: var(--panel); border-bottom: 1px solid var(--line);
-	}
+	body { background: var(--bg); color: var(--txt); font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; display: flex; flex-direction: column; overflow: hidden; }
+	header { display: flex; align-items: center; gap: 14px; padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--line); flex: none; }
 	.logo { font-weight: 800; font-size: 15px; letter-spacing: .5px; }
 	.logo em { color: var(--blue); font-style: normal; }
 	.tag { color: var(--dim); font-size: 12px; }
 	tabs { display: flex; gap: 6px; margin-left: auto; }
-	.tab {
-		padding: 5px 14px; border-radius: 8px; cursor: pointer; color: var(--dim);
-		border: 1px solid transparent; user-select: none; font-size: 12.5px;
-	}
+	.tab { padding: 5px 14px; border-radius: 8px; cursor: pointer; color: var(--dim); border: 1px solid transparent; user-select: none; font-size: 12.5px; }
 	.tab.on { background: #16233c; color: var(--txt); border-color: #274066; }
-	.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--slate); flex: none; }
+	.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--faint); flex: none; }
 	.dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
 	.dot.wait { background: var(--amber); }
-	#stats { display: flex; gap: 8px; padding: 8px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+	/* 输入框 */
+	#inputBar { display: flex; gap: 10px; padding: 10px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex: none; align-items: flex-end; }
+	#inputBar textarea { flex: 1; background: #0a1120; color: var(--txt); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font: 13px/1.5 inherit; resize: none; height: 42px; max-height: 120px; outline: none; }
+	#inputBar textarea:focus { border-color: #2f4d7a; }
+	#go { padding: 9px 22px; border-radius: 10px; font-weight: 700; background: linear-gradient(135deg, #1d4ed8, #2563eb); border: none; color: #fff; cursor: pointer; }
+	#go:disabled { opacity: .45; cursor: wait; }
+	#runState { font-size: 12px; color: var(--dim); min-width: 90px; text-align: right; }
+	/* 回答面板 */
+	#answerWrap { display: none; flex: none; margin: 0 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); }
+	#answerWrap summary { cursor: pointer; padding: 8px 14px; color: var(--dim); font-size: 12px; list-style: none; }
+	#answerWrap summary::before { content: "▸ "; }
+	#answerWrap[open] summary::before { content: "▾ "; }
+	#answerBody { padding: 0 14px 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; font-size: 12.5px; color: var(--txt); border-top: 1px dashed var(--line); padding-top: 10px; }
+	#stats { display: flex; gap: 8px; padding: 8px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex-wrap: wrap; flex: none; }
 	.chip { background: #16233c; border: 1px solid #274066; border-radius: 20px; padding: 2px 12px; font-size: 12px; color: var(--dim); }
 	.chip b { color: var(--txt); font-weight: 700; }
 	main { flex: 1; display: flex; min-height: 0; }
-	#canvasWrap { flex: 1; overflow: auto; padding: 26px; }
+	#canvasWrap { flex: 1; overflow: auto; padding: 26px; position: relative; }
 	svg text { font-family: inherit; }
-	.n-id { font-weight: 700; font-size: 13px; }
-	.n-title { font-size: 11.5px; fill: var(--dim); }
-	.n-meta { font-size: 10.5px; }
-	.wave-label { font-size: 11px; fill: var(--faint); font-weight: 700; letter-spacing: 1px; }
-	.edge { stroke: #33507a; stroke-width: 1.6; fill: none; }
-	.edge.inferred { stroke: var(--amber); stroke-dasharray: 5 4; opacity: .85; }
-	.node rect { stroke-width: 1.5; rx: 10; }
-	.st-pending rect { fill: #131f35; stroke: #2c4160; stroke-dasharray: 5 4; }
-	.st-running rect { fill: #12233f; stroke: var(--blue); }
-	.st-running .n-id { fill: #93c5fd; }
-	.st-ok rect { fill: #0e2b22; stroke: var(--green); }
-	.st-ok .n-id { fill: #6ee7b7; }
-	.st-retry rect { fill: #2b2110; stroke: var(--amber); }
-	.st-retry .n-id { fill: #fcd34d; }
-	.st-failed rect { fill: #2b1214; stroke: var(--red); }
-	.st-failed .n-id { fill: #fca5a5; }
-	.st-skipped rect { fill: #101827; stroke: #334155; stroke-dasharray: 3 3; }
-	.st-skipped .n-id { fill: var(--faint); }
-	.st-skipped .n-title { fill: #475569; }
-	@keyframes pulse { 50% { opacity: .45; } }
-	.pulse { animation: pulse 1.2s ease-in-out infinite; }
-	.barrier { stroke: #2c4160; stroke-width: 1.5; stroke-dasharray: 4 5; }
-	.barrier.open { stroke: var(--green); stroke-dasharray: none; opacity: .8; }
-	aside {
-		width: 300px; border-left: 1px solid var(--line); background: var(--panel2);
-		display: flex; flex-direction: column; min-height: 0;
-	}
-	aside h3 { font-size: 12px; color: var(--dim); padding: 10px 14px 6px; letter-spacing: 1px; }
+	aside { width: 310px; border-left: 1px solid var(--line); background: var(--panel2); display: flex; flex-direction: column; min-height: 0; flex: none; }
+	aside h3 { font-size: 12px; color: var(--dim); padding: 10px 14px 6px; letter-spacing: 1px; display: flex; align-items: center; gap: 8px; }
+	#replayBtn { display: none; margin-left: auto; font-size: 11px; padding: 2px 10px; }
 	#log { flex: 1; overflow-y: auto; padding: 0 14px 14px; font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; }
-	#log .ln { padding: 2px 0; border-bottom: 1px dashed #16233c; color: var(--dim); }
+	#log .ln { padding: 3px 0; border-bottom: 1px dashed #14203a; color: var(--dim); }
 	#log .t { color: var(--faint); margin-right: 6px; }
 	#log .e-plan { color: #93c5fd; } #log .e-wave { color: #c4b5fd; }
 	#log .e-ok { color: #6ee7b7; } #log .e-violation, #log .e-retry { color: #fcd34d; }
@@ -78,22 +56,63 @@
 	#history .item { padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--dim); }
 	#history .item:hover { background: #16233c; }
 	#history .item.on { background: #16233c; color: var(--txt); }
-	#paste { flex: 1; display: flex; flex-direction: column; padding: 10px 14px; gap: 8px; }
+	#paste { flex: 1; display: none; flex-direction: column; padding: 10px 14px; gap: 8px; }
 	#paste textarea { flex: 1; background: #0a1120; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 11px ui-monospace, Menlo, monospace; resize: none; }
-	button {
-		background: #16233c; color: var(--txt); border: 1px solid #274066; border-radius: 8px;
-		padding: 6px 14px; cursor: pointer; font-size: 12px;
-	}
-	button:hover { background: #1d3050; }
-	#empty { color: var(--faint); text-align: center; margin-top: 80px; line-height: 2; }
+	#pasteGo { align-self: flex-start; }
+	.foot { color: var(--faint); font-size: 11px; padding: 5px 18px; border-top: 1px solid var(--line); background: var(--panel2); flex: none; }
+	#empty { color: var(--faint); text-align: center; margin-top: 90px; line-height: 2.2; }
 	#empty code { background: #16233c; padding: 2px 8px; border-radius: 6px; color: #93c5fd; }
-	.foot { color: var(--faint); font-size: 11px; padding: 5px 18px; border-top: 1px solid var(--line); background: var(--panel2); }
+	/* 节点详情面板 */
+	#detail { display: none; position: absolute; top: 18px; right: 18px; width: 460px; max-height: calc(100% - 36px); overflow: auto; background: #0d1729; border: 1px solid #24385c; border-radius: 12px; box-shadow: 0 12px 40px #0009; z-index: 5; }
+	#detail .hd { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--line); position: sticky; top: 0; background: #0d1729; }
+	#detail .hd b { font-size: 15px; }
+	#detail .hd .x { margin-left: auto; cursor: pointer; color: var(--faint); font-size: 16px; padding: 2px 8px; border-radius: 6px; }
+	#detail .hd .x:hover { background: #1a2a47; color: var(--txt); }
+	#detail .sec { padding: 10px 16px; }
+	#detail .sec h4 { font-size: 11px; color: var(--faint); letter-spacing: 1px; margin-bottom: 4px; }
+	#detail .body { font-size: 12.5px; white-space: pre-wrap; color: var(--txt); background: #0a1120; border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 220px; overflow: auto; }
+	#detail .kv { display: flex; flex-wrap: wrap; gap: 6px; }
+	#detail .kv span { background: #16233c; border: 1px solid #274066; border-radius: 6px; padding: 1px 8px; font-size: 11px; color: var(--dim); }
+	/* SVG 节点样式 */
+	.wave-label { font-size: 11px; fill: var(--faint); font-weight: 700; letter-spacing: 1.5px; }
+	.wave-sub { font-size: 10px; fill: #3d4f70; }
+	.edge { stroke: #2c4160; stroke-width: 1.8; fill: none; }
+	.edge.inferred { stroke: var(--amber); stroke-dasharray: 5 4; opacity: .75; }
+	@keyframes dashmove { to { stroke-dashoffset: -18; } }
+	.edge.hot { stroke: var(--blue); stroke-dasharray: 7 5; animation: dashmove .8s linear infinite; }
+	g.node { cursor: pointer; }
+	g.node:hover rect.card { filter: brightness(1.25); }
+	rect.card { fill: #111d33; stroke: #2c4160; stroke-width: 1.5; }
+	rect.accent { width: 4; stroke: none; }
+	g.st-pending rect.card { stroke-dasharray: 5 4; }
+	g.st-pending rect.accent { fill: #3d4f70; }
+	g.st-running rect.card { fill: #0f2440; stroke: var(--blue); }
+	g.st-running rect.accent { fill: var(--blue); }
+	g.st-ok rect.card { fill: #0c251e; stroke: var(--green); }
+	g.st-ok rect.accent { fill: var(--green); }
+	g.st-retry rect.card { fill: #2a2110; stroke: var(--amber); }
+	g.st-retry rect.accent { fill: var(--amber); }
+	g.st-failed rect.card { fill: #2a1114; stroke: var(--red); }
+	g.st-failed rect.accent { fill: var(--red); }
+	g.st-skipped rect.card { fill: #0f1626; stroke: #2b3a52; stroke-dasharray: 3 3; }
+	g.st-skipped rect.accent { fill: #2b3a52; }
+	g.st-skipped .n-title, g.st-skipped .n-id { opacity: .5; }
+	.n-icon { font-size: 13px; }
+	.n-id { font-weight: 700; font-size: 13.5px; fill: var(--txt); }
+	g.st-running .n-id { fill: #93c5fd; } g.st-ok .n-id { fill: #6ee7b7; }
+	g.st-retry .n-id { fill: #fcd34d; } g.st-failed .n-id { fill: #fca5a5; }
+	.n-title { font-size: 11.5px; fill: var(--dim); }
+	.n-meta { font-size: 10.5px; fill: var(--faint); }
+	@keyframes pulse { 50% { opacity: .55; } }
+	.pulse { animation: pulse 1.2s ease-in-out infinite; }
+	.barrier { stroke: #2c4160; stroke-width: 1.5; stroke-dasharray: 4 5; }
+	.barrier.open { stroke: var(--green); stroke-dasharray: none; opacity: .9; }
 </style>
 </head>
 <body>
 <header>
 	<div class="logo">pi-graph<em>-tool</em></div>
-	<div class="tag">graph_run 执行追踪 · Wave 调度可视化</div>
+	<div class="tag">graph_run 执行可视化 · Wave 调度</div>
 	<tabs>
 		<div class="tab on" data-m="live">实时</div>
 		<div class="tab" data-m="history">历史</div>
@@ -101,11 +120,20 @@
 	</tabs>
 	<div class="dot" id="dot" title="连接状态"></div>
 </header>
+<div id="inputBar">
+	<textarea id="msg" placeholder="输入任务（如：帮我调研 React、Vue、Svelte 三个框架，然后对比汇总）→ 回车运行，下方实时长图"></textarea>
+	<button id="go">运行 ▶</button>
+	<div id="runState">空闲</div>
+</div>
+<details id="answerWrap"><summary>最终回答（任务完成后展开）</summary><div id="answerBody"></div></details>
 <div id="stats"></div>
 <main>
-	<div id="canvasWrap"><div id="empty">等待事件……<br>任务侧设置 <code>PI_GRAPH_TRACE_DIR</code> 后调用 graph_run，图会在这里实时生长</div></div>
+	<div id="canvasWrap">
+		<div id="empty">等待事件……<br>在上面输入框发一个任务，或任务侧设置 <code>PI_GRAPH_TRACE_DIR</code> 后调用 graph_run</div>
+		<div id="detail"></div>
+	</div>
 	<aside>
-		<h3 id="asideTitle">事件流</h3>
+		<h3 id="asideTitle">事件流 <button id="replayBtn">▶ 按时序重放</button></h3>
 		<div id="log"></div>
 		<div id="history" style="display:none"></div>
 		<div id="paste" style="display:none">
@@ -114,34 +142,28 @@
 		</div>
 	</aside>
 </main>
-<div class="foot">数据源：PI_GRAPH_TRACE_DIR 的 JSONL 事件流 · 服务器：<code>node ui/server.mjs</code></div>
+<div class="foot">数据源：PI_GRAPH_TRACE_DIR JSONL 事件流 · 点击节点可查看该节点的输入与产出 · 服务器：<code>node ui/server.mjs</code></div>
 
 <script>
 "use strict";
-// ============ 状态模型：事件流 → 单一 state，渲染纯函数式重建 ============
-const S = {
-	plan: null,            // {nodes:[], edges:[], waves:[], inferred:[]}
-	node: new Map(),       // id -> {status:'pending|running|ok|retry|failed|skipped', seconds, chars, retried, salvaged, reason, startTs}
-	wave: [],              // 每波 {ids:[], startTs, endTs, open:false}
-	t0: 0, done: null, runName: "",
-};
+const S = { plan: null, node: new Map(), wave: [], t0: 0, done: null, runName: "" };
 const $ = (s) => document.querySelector(s);
 const stat = (id) => S.node.get(id);
+const ICON = { pending: "○", running: "▶", ok: "✓", retry: "↻", failed: "✗", skipped: "⏭" };
 
 function reset(runName) {
 	S.plan = null; S.node = new Map(); S.wave = []; S.t0 = 0; S.done = null; S.runName = runName || "";
-	$("#log").innerHTML = ""; $("#empty").style.display = "block"; $("#canvasWrap").querySelector("svg")?.remove();
+	$("#log").innerHTML = ""; $("#empty").style.display = "block";
+	$("#canvasWrap").querySelector("svg")?.remove(); $("#detail").style.display = "none";
 	renderStats();
 }
-
 function logLine(cls, label, rel) {
 	const el = document.createElement("div");
 	el.className = "ln " + cls;
-	const t = rel !== undefined ? ((rel / 1000).toFixed(1) + "s") : "";
-	el.innerHTML = `<span class="t">${t}</span>${label}`;
+	el.innerHTML = `<span class="t">${rel !== undefined ? (rel / 1000).toFixed(1) + "s" : ""}</span>${label}`;
 	const box = $("#log");
 	box.prepend(el);
-	while (box.children.length > 250) box.lastChild.remove();
+	while (box.children.length > 300) box.lastChild.remove();
 }
 
 function applyEvent(ev) {
@@ -149,7 +171,7 @@ function applyEvent(ev) {
 	switch (ev.t) {
 		case "plan": {
 			S.plan = ev; S.t0 = ev.ts;
-			for (const n of ev.nodes) S.node.set(n.id, { status: "pending" });
+			for (const n of ev.nodes) S.node.set(n.id, { status: "pending", prompt: n.prompt, profile: n });
 			S.wave = ev.waves.map((ids) => ({ ids, startTs: 0, endTs: 0, open: false }));
 			const inferred = new Set((ev.inferredEdges || []).map((e) => e.from + ">" + e.to));
 			S.plan.edgeKind = new Map(ev.edges.map((e) => [e.from + ">" + e.to, inferred.has(e.from + ">" + e.to) ? "inferred" : "explicit"]));
@@ -164,152 +186,162 @@ function applyEvent(ev) {
 		}
 		case "node_ok": {
 			const n = stat(ev.id); if (!n) break;
-			Object.assign(n, { status: "ok", seconds: ev.seconds, chars: ev.chars, retried: !!ev.retried, salvaged: ev.salvaged });
+			Object.assign(n, { status: "ok", seconds: ev.seconds, chars: ev.chars, retried: !!ev.retried, salvaged: ev.salvaged, text: ev.text });
 			logLine("e-ok", `✓ [${ev.id}] 完成 ${ev.seconds}s · ${ev.chars} 字` + (ev.retried ? `（重试挽回${ev.salvaged === "first" ? "·沿用首答" : ""}）` : ""), rel);
 			break;
 		}
-		case "violation": {
-			const n = stat(ev.id); if (n) n.status = "retry";
-			logLine("e-violation", `⚠ [${ev.id}] 违约：${ev.reason}`, rel);
-			break;
-		}
-		case "retry_start": {
-			const n = stat(ev.id); if (n) n.status = "retry";
-			logLine("e-retry", `↻ [${ev.id}] 隔离重试（不重跑整波）`, rel);
-			break;
-		}
-		case "node_failed": {
-			const n = stat(ev.id); if (n) { n.status = "failed"; n.reason = ev.reason; }
-			logLine("e-failed", `✗ [${ev.id}] 失败：${ev.reason}`, rel);
-			break;
-		}
-		case "skip": {
-			const n = stat(ev.id); if (n) { n.status = "skipped"; n.reason = ev.reason; }
-			logLine("e-skip", `⏭ [${ev.id}] 级联跳过：${ev.reason}`, rel);
-			break;
-		}
-		case "wave_end": {
-			const w = S.wave[ev.wave - 1]; if (w) { w.endTs = ev.ts; w.open = false; }
-			logLine("e-wave", `— Wave ${ev.wave} 屏障放行 —`, rel);
-			break;
-		}
+		case "violation": { const n = stat(ev.id); if (n) { n.status = "retry"; n.violReason = ev.reason; } logLine("e-violation", `⚠ [${ev.id}] 违约：${ev.reason}`, rel); break; }
+		case "retry_start": { const n = stat(ev.id); if (n) n.status = "retry"; logLine("e-retry", `↻ [${ev.id}] 隔离重试（不重跑整波）`, rel); break; }
+		case "node_failed": { const n = stat(ev.id); if (n) { n.status = "failed"; n.reason = ev.reason; } logLine("e-failed", `✗ [${ev.id}] 失败：${ev.reason}`, rel); break; }
+		case "skip": { const n = stat(ev.id); if (n) { n.status = "skipped"; n.reason = ev.reason; } logLine("e-skip", `⏭ [${ev.id}] 级联跳过：${ev.reason}`, rel); break; }
+		case "wave_end": { const w = S.wave[ev.wave - 1]; if (w) { w.endTs = ev.ts; w.open = false; } logLine("e-wave", `— Wave ${ev.wave} 屏障放行 —`, rel); break; }
 		case "abort": logLine("e-failed", "检测到中止信号：剩余节点全部跳过", rel); break;
 		case "done": {
 			S.done = ev;
 			logLine("e-done", `图执行完成：${ev.ok}/${ev.total} 成功 · ${ev.waveSeconds}s${ev.violations ? ` · 违约重试 ${ev.violations}` : ""}${ev.skipped ? ` · 跳过 ${ev.skipped}` : ""}`, rel);
 			break;
 		}
-		case "new_run": return; // 服务器收流让 EventSource 重连，无需处理
+		case "new_run": return;
 	}
 	renderStats();
 	if (S.plan) { $("#empty").style.display = "none"; render(); }
 }
-
 function renderStats() {
 	const parts = [];
 	if (S.plan) {
-		const ok = [...S.node.values()].filter((n) => n.status === "ok").length;
-		const fail = [...S.node.values()].filter((n) => n.status === "failed").length;
-		const skip = [...S.node.values()].filter((n) => n.status === "skipped").length;
-		parts.push(`节点 <b>${ok}</b> ok / ${S.plan.nodes.length}` + (fail ? ` · <b>${fail}</b> 失败` : "") + (skip ? ` · <b>${skip}</b> 跳过` : ""));
+		const c = (s) => [...S.node.values()].filter((n) => n.status === s).length;
+		parts.push(`节点 <b>${c("ok")}</b> ok / ${S.plan.nodes.length}` + (c("failed") ? ` · <b>${c("failed")}</b> 失败` : "") + (c("skipped") ? ` · <b>${c("skipped")}</b> 跳过` : ""));
 		parts.push(`Wave <b>${S.plan.waves.length}</b>`);
-		const running = [...S.node.values()].some((n) => n.status === "running" || n.status === "retry");
+		const running = c("running") + c("retry") > 0;
 		parts.push(`墙钟 <b>${S.done ? S.done.waveSeconds + "s" : running ? "…" : "—"}</b>`);
-		if (S.runName) parts.push(`<span style="color:var(--faint)">${S.runName}</span>`);
+		if (S.runName) parts.push(`<span style="color:var(--faint)">${S.runName.slice(4, 19)}</span>`);
 	}
 	$("#stats").innerHTML = parts.map((p) => `<span class="chip">${p}</span>`).join("");
 }
 
-// ============ SVG 渲染 ============
+// ============ SVG ============
 const NS = "http://www.w3.org/2000/svg";
-const el = (tag, attrs, text) => {
-	const e = document.createElementNS(NS, tag);
-	for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
-	if (text !== undefined) e.textContent = text;
-	return e;
-};
-const NODE_W = 210, NODE_H = 64, COL_GAP = 110, ROW_GAP = 18;
+const el = (tag, attrs, text) => { const e = document.createElementNS(NS, tag); for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v); if (text !== undefined) e.textContent = text; return e; };
+const W_CARD = 235, H_CARD = 74, COL_GAP = 120, ROW_GAP = 20;
+let layout = null;
 
 function render() {
 	$("#canvasWrap").querySelector("svg")?.remove();
 	if (!S.plan) return;
 	const cols = S.plan.waves.map((ids) => ids.map((id) => S.plan.nodes.find((n) => n.id === id)));
-	const colH = (n) => n * NODE_H + (n - 1) * ROW_GAP;
-	const H = Math.max(...cols.map((c) => colH(c.length)), 200) + 140;
-	const W = cols.length * (NODE_W + COL_GAP) + 90;
+	const colH = (n) => n * H_CARD + (n - 1) * ROW_GAP;
+	const H = Math.max(...cols.map((c) => colH(c.length)), 220) + 150;
+	const W = cols.length * (W_CARD + COL_GAP) + 100;
 	const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: Math.max(W, $("#canvasWrap").clientWidth - 52), height: H });
+	const defs = el("defs", {});
+	defs.innerHTML = `<marker id="arw" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#2c4160"/></marker>`;
+	svg.append(defs);
 	const X = [], Y = new Map();
+	layout = { Y: new Map(), X: [] };
 	cols.forEach((col, ci) => {
-		const x = 50 + ci * (NODE_W + COL_GAP);
-		X[ci] = x;
+		const x = 56 + ci * (W_CARD + COL_GAP);
+		X[ci] = x; layout.X[ci] = x;
 		const totalH = colH(col.length);
-		svg.append(el("rect", { x: x - 22, y: 46, width: NODE_W + 44, height: totalH + 48, rx: 12, fill: "#0e1729", stroke: "#1c2a44" }));
-		svg.append(el("text", { x, y: 68, class: "wave-label" }, `WAVE ${ci + 1} · ${col.length} 节点`));
+		const waveOpen = S.wave[ci]?.open;
+		svg.append(el("rect", { x: x - 24, y: 44, width: W_CARD + 48, height: totalH + 56, rx: 14, fill: waveOpen ? "#0e1c33" : "#0d1526", stroke: waveOpen ? "#274066" : "#152238" }));
+		svg.append(el("text", { x, y: 66, class: "wave-label" }, `WAVE ${ci + 1}`));
+		svg.append(el("text", { x, y: 82, class: "wave-sub" }, waveOpen ? `${col.length} 节点 · 运行中` : `${col.length} 节点`));
 		col.forEach((n, ri) => {
-			const y = 92 + (H - 120 - totalH) / 2 + ri * (NODE_H + ROW_GAP);
-			Y.set(n.id, { x, y });
+			const y = 104 + (H - 140 - totalH) / 2 + ri * (H_CARD + ROW_GAP);
+			Y.set(n.id, { x, y }); layout.Y.set(n.id, { x, y });
 		});
 	});
-	// 边（defs 必须先入树，marker 引用才生效）
-	const defs = el("defs", {});
-	defs.innerHTML = `<marker id="arw" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#33507a"/></marker>`;
-	svg.append(defs);
+	for (let ci = 1; ci < cols.length; ci++) {
+		const x = X[ci] - 50;
+		const w = S.wave[ci - 1];
+		const open = w && w.startTs && !w.open;
+		svg.append(el("line", { x1: x, y1: 58, x2: x, y2: H - 64, class: "barrier" + (open ? " open" : "") }));
+		svg.append(el("text", { x: x + 7, y: 72, "font-size": 10, fill: open ? "#10b981" : "#3d4f70" }, open ? "屏障 ✓" : "屏障"));
+	}
 	for (const e of S.plan.edges) {
 		const a = Y.get(e.from), b = Y.get(e.to);
 		if (!a || !b) continue;
-		const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
-		const mx = (x1 + x2) / 2;
-		const kind = S.plan.edgeKind.get(e.from + ">" + e.to);
-		svg.append(el("path", { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 4},${y2}`, class: `edge ${kind === "inferred" ? "inferred" : ""}`, "marker-end": "url(#arw)" }));
+		const src = stat(e.from);
+		const hot = src && (src.status === "running" || src.status === "retry") ? " hot" : "";
+		const kind = S.plan.edgeKind.get(e.from + ">" + e.to) === "inferred" ? " inferred" : "";
+		const x1 = a.x + W_CARD, y1 = a.y + H_CARD / 2, x2 = b.x, y2 = b.y + H_CARD / 2, mx = (x1 + x2) / 2;
+		svg.append(el("path", { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 4},${y2}`, class: `edge${kind}${hot}`, "marker-end": "url(#arw)" }));
 	}
-	// 屏障线（波间）
-	for (let ci = 1; ci < cols.length; ci++) {
-		const x = X[ci] - 45;
-		const w = S.wave[ci - 1];
-		const open = w && w.startTs && !w.open;
-		svg.append(el("line", { x1: x, y1: 60, x2: x, y2: H - 60, class: "barrier" + (open ? " open" : "") }));
-		svg.append(el("text", { x: x + 6, y: 74, "font-size": 10, fill: open ? "#10b981" : "#475569" }, open ? "屏障 ✓" : "屏障"));
-	}
-	// 节点
 	for (const n of S.plan.nodes) {
 		const pos = Y.get(n.id), st = stat(n.id) || { status: "pending" };
-		const g = el("g", { class: `node st-${st.status === "running" || st.status === "retry" ? st.status : st.status}` });
-		if (st.status === "running" || st.status === "retry") g.setAttribute("class", `node st-${st.status} pulse`);
-		g.append(el("rect", { x: pos.x, y: pos.y, width: NODE_W, height: NODE_H, rx: 10 }));
-		let meta = "";
-		if (st.status === "ok") meta = `${st.seconds}s · ${st.chars} 字${st.retried ? " · 重试挽回" : ""}`;
-		else if (st.status === "running" || st.status === "retry") {
-			if (st.startTs) { meta = "运行中"; g.dataset.id = n.id; }
-			else meta = "排队中";
-		}
-		else if (st.status === "failed") meta = "失败：" + (st.reason || "").slice(0, 22);
-		else if (st.status === "skipped") meta = "跳过：" + (st.reason || "").slice(0, 20);
+		const g = el("g", { class: `node st-${st.status}${st.status === "running" || st.status === "retry" ? " pulse" : ""}` });
+		g.dataset.id = n.id;
+		g.append(el("rect", { x: pos.x, y: pos.y, width: W_CARD, height: H_CARD, rx: 12, class: "card" }));
+		g.append(el("rect", { x: pos.x, y: pos.y + 10, width: 4, height: H_CARD - 20, rx: 2, class: "accent" }));
+		g.append(el("text", { x: pos.x + 18, y: pos.y + 26, class: "n-icon" }, ICON[st.status] || "○"));
+		g.append(el("text", { x: pos.x + 38, y: pos.y + 26, class: "n-id" }, n.id));
+		g.append(el("text", { x: pos.x + 18, y: pos.y + 46, class: "n-title" }, (n.title + (n.tools?.length ? ` ⚙${n.tools.join("/")}` : "")).slice(0, 26)));
+		let meta = "", fill = "";
+		if (st.status === "ok") { meta = `${st.seconds}s · ${st.chars} 字${st.retried ? " · 重试挽回" : ""}`; fill = "#6ee7b7"; }
+		else if (st.status === "running") { meta = st.startTs ? "运行中" : "排队中"; fill = "#93c5fd"; }
+		else if (st.status === "retry") { meta = "违约 · 挽回重试中"; fill = "#fcd34d"; }
+		else if (st.status === "failed") { meta = "失败：" + (st.reason || "").slice(0, 20); fill = "#fca5a5"; }
+		else if (st.status === "skipped") { meta = "跳过：" + (st.reason || "").slice(0, 18); }
 		else meta = "待执行";
-		const badge = n.tools && n.tools.length ? ` ⚙${n.tools.join("/")}` : "";
-		g.append(el("text", { x: pos.x + 14, y: pos.y + 24, class: "n-id" }, `${n.id}`));
-		g.append(el("text", { x: pos.x + 14, y: pos.y + 42, class: "n-title" }, `${n.title}${badge}`.slice(0, 24)));
-		const metaEl = el("text", { x: pos.x + 14, y: pos.y + 57, class: "n-meta" }, meta);
-		if (st.status === "ok") metaEl.setAttribute("fill", "#6ee7b7");
-		if (st.status === "failed") metaEl.setAttribute("fill", "#fca5a5");
-		if (st.status === "running" || st.status === "retry") { metaEl.setAttribute("fill", st.status === "retry" ? "#fcd34d" : "#93c5fd"); metaEl.dataset.timer = n.id; metaEl.dataset.start = st.startTs; }
-		g.append(metaEl);
+		const m = el("text", { x: pos.x + 18, y: pos.y + 63, class: "n-meta" }, meta);
+		if (fill) m.setAttribute("fill", fill);
+		if ((st.status === "running" || st.status === "retry") && st.startTs) { m.dataset.timer = n.id; m.dataset.base = meta; }
+		g.append(m);
+		g.addEventListener("click", () => showDetail(n));
 		svg.append(g);
 	}
 	$("#canvasWrap").append(svg);
 }
-
-// 运行中节点的实时计时
 setInterval(() => {
 	for (const t of document.querySelectorAll("[data-timer]")) {
 		const st = stat(t.dataset.timer);
-		if (!st) continue;
-		if (st.status === "running" && st.startTs) t.textContent = `运行中 ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
-		else if (st.status === "retry" && st.startTs) t.textContent = `挽回重试 ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
+		if (st && st.startTs) t.textContent = `${t.dataset.base} ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
 	}
 }, 250);
 
-// ============ 三种视图：实时 / 历史 / 粘贴 ============
-let es = null;
+// ============ 节点详情：输入 prompt + 产出文本 + 档案 ============
+function showDetail(n) {
+	const st = stat(n.id) || {};
+	const prof = st.profile || n;
+	const chips = [];
+	if (prof.tools?.length) chips.push(`工具 ${prof.tools.join("/")}`);
+	if (prof.minOutputChars !== undefined) chips.push(`阈值 ${prof.minOutputChars}`);
+	if (prof.outputCap) chips.push(`截断 ${prof.outputCap}`);
+	if (prof.workdir) chips.push(`目录 ${prof.workdir}`);
+	const dep = (prof.dependsOn || []).join("、");
+	$("#detail").innerHTML = `
+		<div class="hd"><span>${ICON[st.status] || "○"}</span><b>${n.id}</b><span style="color:var(--dim)">${n.title}</span><span class="x" onclick="document.getElementById('detail').style.display='none'">✕</span></div>
+		<div class="sec"><h4>输入 · PROMPT（{{id}} 运行前已替换为上游输出）</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
+		${st.text ? `<div class="sec"><h4>产出 · 前 2000 字（共 ${st.chars} 字，${st.seconds}s${st.retried ? " · 重试挽回" : ""}）</h4><div class="body">${esc(st.text)}</div></div>` : ""}
+		${st.status === "skipped" || st.status === "failed" ? `<div class="sec"><h4>状态说明</h4><div class="body">${esc((st.reason || st.violReason || ""))}</div></div>` : ""}
+		<div class="sec"><h4>节点档案${dep ? ` · 依赖：${dep}` : ""}</h4><div class="kv">${chips.length ? chips.map((c) => `<span>${c}</span>`).join("") : '<span>默认（纯 LLM · 无工具）</span>'}</div></div>`;
+	$("#detail").style.display = "block";
+}
+const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+// ============ 输入框 → POST /run ============
+$("#msg").addEventListener("keydown", (e) => {
+	if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#go").click(); }
+});
+$("#go").onclick = async () => {
+	const message = $("#msg").value.trim();
+	if (!message) return;
+	$("#go").disabled = true; $("#runState").textContent = "运行中…";
+	$("#answerWrap").style.display = "none";
+	try {
+		const r = await fetch("/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) });
+		const d = await r.json();
+		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); return; }
+		const text = (d.stdout || "").trim();
+		$("#answerBody").textContent = text || "（无输出）";
+		$("#answerWrap").style.display = "block"; $("#answerWrap").open = true;
+		$("#runState").textContent = "完成";
+	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); }
+	$("#go").disabled = false;
+};
+
+// ============ 视图切换 / 实时 / 历史 / 粘贴 ============
+let es = null, lastEvents = null;
 function connectLive() {
 	es?.close();
 	es = new EventSource("/events");
@@ -318,14 +350,13 @@ function connectLive() {
 	es.onmessage = (m) => {
 		try {
 			const ev = JSON.parse(m.data);
-			if (ev.t === "new_run") return; // 服务器已收流，EventSource 会自动重连
+			if (ev.t === "new_run") return;
 			if (ev.t === "plan" && S.runName && ev.run !== S.runName) reset(ev.run);
 			if (!S.runName && ev.run) { reset(ev.run); $("#dot").className = "dot live"; }
 			applyEvent(ev);
 		} catch (e) { console.error("[graph-ui] 事件处理失败：", e); }
 	};
 }
-
 async function loadHistory() {
 	const runs = await (await fetch("/api/runs")).json();
 	const box = $("#history");
@@ -333,19 +364,27 @@ async function loadHistory() {
 	for (const r of runs) {
 		const item = document.createElement("div");
 		item.className = "item";
-		const d = new Date(r.mtime);
-		item.innerHTML = `<b>${r.name.replace(".jsonl", "").slice(4, 19)}</b><br>${(r.size / 1024).toFixed(1)} KB · ${d.toLocaleTimeString()}`;
+		item.innerHTML = `<b>${r.name.replace(".jsonl", "").slice(4, 19)}</b><br>${(r.size / 1024).toFixed(1)} KB · ${new Date(r.mtime).toLocaleTimeString()}`;
 		item.onclick = async () => {
 			box.querySelectorAll(".item").forEach((x) => x.classList.remove("on"));
 			item.classList.add("on");
 			reset(r.name);
 			const lines = (await (await fetch("/api/run/" + r.name)).text()).split("\n").filter(Boolean);
-			for (const ln of lines) { try { applyEvent(JSON.parse(ln)); } catch {} }
+			const evs = lines.map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter(Boolean);
+			lastEvents = evs; $("#replayBtn").style.display = "";
+			for (const ev of evs) applyEvent(ev);
 		};
 		box.append(item);
 	}
 }
-
+$("#replayBtn").onclick = () => {
+	if (!lastEvents?.length) return;
+	const evs = lastEvents;
+	reset(evs[0].run || "重放");
+	const t0 = evs[0].ts;
+	const SPEED = 4;
+	for (const ev of evs) setTimeout(() => applyEvent(ev), (ev.ts - t0) / SPEED);
+};
 $("#pasteGo").onclick = () => {
 	const raw = $("#pasteBox").value;
 	const first = raw.indexOf("{"), last = raw.lastIndexOf("}");
@@ -354,11 +393,8 @@ $("#pasteGo").onclick = () => {
 	if (!Array.isArray(d.waves) || !Array.isArray(d.nodes)) return alert("缺少 waves/nodes 字段——请粘贴 graph_run 结果中的 details 对象");
 	reset("粘贴回放");
 	const now = Date.now();
-	const feed = (t, extra, dt) => { const ev = { t, ts: now + dt, ...extra }; applyEvent(ev); };
-	feed("plan", {
-		nodes: d.nodes.map((n) => ({ id: n.id, title: n.title, wave: n.wave, dependsOn: [], tools: [] })),
-		waves: d.waves, edges: d.edges || [], inferredEdges: [],
-	}, 0);
+	const feed = (t, extra, dt) => applyEvent({ t, ts: now + dt, ...extra });
+	feed("plan", { nodes: d.nodes.map((n) => ({ id: n.id, title: n.title, wave: n.wave, dependsOn: [], tools: [] })), waves: d.waves, edges: d.edges || [], inferredEdges: [] }, 0);
 	const viol = new Map((d.violations || []).map((v) => [v.id, v]));
 	let dt = 100;
 	for (let w = 0; w < d.waves.length; w++) {
@@ -376,7 +412,6 @@ $("#pasteGo").onclick = () => {
 	}
 	feed("done", { ok: d.nodes.filter((n) => n.status === "ok").length, failed: d.nodes.filter((n) => n.status === "failed").length, skipped: d.nodes.filter((n) => n.status === "skipped").length, total: d.nodes.length, waveSeconds: d.waveSeconds, violations: (d.violations || []).length }, dt);
 };
-
 document.querySelectorAll(".tab").forEach((tab) => {
 	tab.onclick = () => {
 		document.querySelectorAll(".tab").forEach((x) => x.classList.remove("on"));
@@ -385,9 +420,10 @@ document.querySelectorAll(".tab").forEach((tab) => {
 		$("#log").style.display = m === "live" ? "" : "none";
 		$("#history").style.display = m === "history" ? "" : "none";
 		$("#paste").style.display = m === "paste" ? "" : "none";
-		$("#asideTitle").textContent = m === "live" ? "事件流" : m === "history" ? "历史 run" : "离线回放";
+		$("#asideTitle").childNodes[0].textContent = m === "live" ? "事件流 " : m === "history" ? "历史 run " : "离线回放 ";
+		if (m !== "live") $("#replayBtn").style.display = "";
 		if (m === "history") loadHistory();
-		if (m === "live") { es?.close(); reset(""); connectLive(); }
+		if (m === "live") { es?.close(); reset(""); connectLive(); $("#replayBtn").style.display = "none"; lastEvents = null; }
 	};
 });
 connectLive();

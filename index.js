@@ -37,6 +37,7 @@
  *     （plan / wave_start / node_ok / violation / retry / skip / done），
  *     `node ui/server.mjs` 读取这些事件实时渲染 Wave 调度动画
  *   - 默认关闭、全程 try/catch 包裹：追踪永不影响图执行本身
+ *   - 注意：trace 含各节点 prompt 与产出文本（产出截断至 2000 字），目录请勿外传
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -372,7 +373,7 @@ export default function (pi) {
 					if (r.status === "fulfilled" && r.value.text.length > minChars) {
 						n.status = "ok";
 						n.result = r.value;
-						trace({ t: "node_ok", id: n.id, seconds: Number(r.value.seconds.toFixed(1)), chars: r.value.text.length });
+						trace({ t: "node_ok", id: n.id, seconds: Number(r.value.seconds.toFixed(1)), chars: r.value.text.length, text: r.value.text.slice(0, 2000) });
 					} else {
 						const reason = r.status === "rejected"
 							? String(r.reason?.message ?? r.reason).slice(0, 100)
@@ -406,7 +407,7 @@ export default function (pi) {
 							n.status = "ok";
 							n.result = retry;
 							log(`✅ [${n.title}] 重试挽回成功${best === firstText ? "（沿用首答）" : ""}`);
-							trace({ t: "node_ok", id: n.id, seconds: Number(retry.seconds.toFixed(1)), chars: retry.text.length, retried: true, salvaged: best === firstText ? "first" : "retry" });
+							trace({ t: "node_ok", id: n.id, seconds: Number(retry.seconds.toFixed(1)), chars: retry.text.length, text: retry.text.slice(0, 2000), retried: true, salvaged: best === firstText ? "first" : "retry" });
 						} else {
 							n.status = "failed";
 							log(`❌ [${n.title}] 两次尝试均无有效输出，放弃该节点（其后代将被跳过，不影响其他分支）`);

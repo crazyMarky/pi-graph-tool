@@ -22,6 +22,7 @@
  *                               浏览器 EventSource 自动重连切到新 run
  */
 import http from "node:http";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +36,8 @@ const argOf = (name, fallback) => {
 	return i >= 0 && args[i + 1] ? args[i + 1] : fallback;
 };
 const PORT = Number(argOf("port", process.env.PORT ?? 8788));
+const RUN_CWD = argOf("cwd", process.env.PI_GRAPH_UI_CWD ?? process.cwd());
+const RUN_MODEL = argOf("model", process.env.PI_GRAPH_UI_MODEL ?? "");
 const TRACE_DIR = argOf("dir", process.env.PI_GRAPH_TRACE_DIR ?? path.join(here, "..", "traces"));
 fs.mkdirSync(TRACE_DIR, { recursive: true });
 
@@ -95,8 +98,35 @@ function streamRun(req, res, file) {
 	}
 }
 
+// ---- 输入框后端：无头跑一次 pi，产出 trace 由 /events 跟随，最终回答返回给页面 ----
+let running = null;
+function startRun(message, res) {
+	if (running) return json(res, 409, { error: "已有任务在运行，请等它结束" });
+	const args = ["-p", message, "--no-session"];
+	if (RUN_MODEL) args.push("--model", RUN_MODEL);
+	const proc = spawn("pi", args, { cwd: RUN_CWD, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+	let out = "", err = "";
+	proc.stdout.on("data", (d) => { out += d; });
+	proc.stderr.on("data", (d) => { err += d; });
+	const killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 15 * 60_000);
+	running = proc;
+	proc.on("close", (code) => {
+		clearTimeout(killer); running = null;
+		json(res, 200, { code, stdout: out.slice(-20000), stderr: err.slice(-500) });
+	});
+}
+
 const server = http.createServer((req, res) => {
 	const url = new URL(req.url, "http://x");
+	if (req.method === "POST" && url.pathname === "/run") {
+		let body = "";
+		req.on("data", (c) => { body += c; if (body.length > 100_000) req.destroy(); });
+		req.on("end", () => {
+			try { const { message } = JSON.parse(body || "{}"); if (!message || !String(message).trim()) return json(res, 400, { error: "message 不能为空" }); startRun(String(message), res); }
+			catch (e) { json(res, 500, { error: "启动失败：" + (e?.message ?? e) }); }
+		});
+		return;
+	}
 	if (url.pathname === "/" || url.pathname === "/index.html") {
 		res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 		res.end(fs.readFileSync(path.join(here, "index.html")));
