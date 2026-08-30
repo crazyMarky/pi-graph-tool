@@ -43,6 +43,33 @@ cp -r pi-graph-tool .pi/extensions/    # 项目级（推荐）
 # 或拷到 ~/.pi/agent/extensions/ 全局生效
 ```
 
+## 执行可视化（v0.2.4 新增，ui/ 目录）
+
+把 `graph_run` 的执行过程——Wave 并行、屏障放行、违约重试、级联跳过——**实时画成图**。零依赖（纯 Node 内置模块 + 单文件页面），不用 npm install。
+
+![screenshot](ui/screenshot.png)
+
+两个终端：
+
+```bash
+# 终端 1：任务侧（设置 PI_GRAPH_TRACE_DIR 后正常运行 pi 即可，对使用方式零侵入）
+export PI_GRAPH_TRACE_DIR=/tmp/pgt-traces
+cd <装了本扩展的项目>
+pi "帮我调研 React、Vue、Svelte、Angular 四个框架，然后对比汇总"
+
+# 终端 2：可视化
+PI_GRAPH_TRACE_DIR=/tmp/pgt-traces node ui/server.mjs   # 打开 http://localhost:8788
+```
+
+页面能力：
+
+- **实时**：任务跑的同时，节点按 Wave 分列生长、运行中节点蓝色脉冲带秒表、波间屏障完成后变绿放行
+- **历史**：切换任意一次已落盘的 run 回放
+- **粘贴回放**：把 `graph_run` 结果里的 `details` JSON 粘进来，离线重建视图（无需服务器）
+- 语义可视化：隐式推断边（琥珀虚线）与显式边区分；违约→重试挽回（`重试挽回` 徽标）；失败级联（后代灰化 + 原因）
+
+追踪设计：默认关闭（不设 `PI_GRAPH_TRACE_DIR` 零开销零副作用）；事件以 JSONL 追加落盘（`plan / wave_start / node_ok / violation / retry_start / skip / wave_end / done`）；全程 try/catch 包裹，追踪通道异常绝不影响图执行本身。
+
 ## 验证安装
 
 1. **存在性**：启动 `pi`，问它 *"你有哪些工具？graph_run 是干什么的？"*

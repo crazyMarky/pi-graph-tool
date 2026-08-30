@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-graph-tool · Wave 调度可视化</title>
+<style>
+	:root {
+		--bg: #0b1220; --panel: #101a2e; --panel2: #0d1526;
+		--line: #1e293b; --txt: #e2e8f0; --dim: #94a3b8; --faint: #64748b;
+		--blue: #3b82f6; --green: #10b981; --amber: #f59e0b; --red: #ef4444; --slate: #64748b;
+	}
+	* { box-sizing: border-box; margin: 0; }
+	html, body { height: 100%; }
+	body {
+		background: var(--bg); color: var(--txt);
+		font: 13px/1.6 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+		display: flex; flex-direction: column;
+	}
+	header {
+		display: flex; align-items: center; gap: 14px; padding: 10px 18px;
+		background: var(--panel); border-bottom: 1px solid var(--line);
+	}
+	.logo { font-weight: 800; font-size: 15px; letter-spacing: .5px; }
+	.logo em { color: var(--blue); font-style: normal; }
+	.tag { color: var(--dim); font-size: 12px; }
+	tabs { display: flex; gap: 6px; margin-left: auto; }
+	.tab {
+		padding: 5px 14px; border-radius: 8px; cursor: pointer; color: var(--dim);
+		border: 1px solid transparent; user-select: none; font-size: 12.5px;
+	}
+	.tab.on { background: #16233c; color: var(--txt); border-color: #274066; }
+	.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--slate); flex: none; }
+	.dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
+	.dot.wait { background: var(--amber); }
+	#stats { display: flex; gap: 8px; padding: 8px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+	.chip { background: #16233c; border: 1px solid #274066; border-radius: 20px; padding: 2px 12px; font-size: 12px; color: var(--dim); }
+	.chip b { color: var(--txt); font-weight: 700; }
+	main { flex: 1; display: flex; min-height: 0; }
+	#canvasWrap { flex: 1; overflow: auto; padding: 26px; }
+	svg text { font-family: inherit; }
+	.n-id { font-weight: 700; font-size: 13px; }
+	.n-title { font-size: 11.5px; fill: var(--dim); }
+	.n-meta { font-size: 10.5px; }
+	.wave-label { font-size: 11px; fill: var(--faint); font-weight: 700; letter-spacing: 1px; }
+	.edge { stroke: #33507a; stroke-width: 1.6; fill: none; }
+	.edge.inferred { stroke: var(--amber); stroke-dasharray: 5 4; opacity: .85; }
+	.node rect { stroke-width: 1.5; rx: 10; }
+	.st-pending rect { fill: #131f35; stroke: #2c4160; stroke-dasharray: 5 4; }
+	.st-running rect { fill: #12233f; stroke: var(--blue); }
+	.st-running .n-id { fill: #93c5fd; }
+	.st-ok rect { fill: #0e2b22; stroke: var(--green); }
+	.st-ok .n-id { fill: #6ee7b7; }
+	.st-retry rect { fill: #2b2110; stroke: var(--amber); }
+	.st-retry .n-id { fill: #fcd34d; }
+	.st-failed rect { fill: #2b1214; stroke: var(--red); }
+	.st-failed .n-id { fill: #fca5a5; }
+	.st-skipped rect { fill: #101827; stroke: #334155; stroke-dasharray: 3 3; }
+	.st-skipped .n-id { fill: var(--faint); }
+	.st-skipped .n-title { fill: #475569; }
+	@keyframes pulse { 50% { opacity: .45; } }
+	.pulse { animation: pulse 1.2s ease-in-out infinite; }
+	.barrier { stroke: #2c4160; stroke-width: 1.5; stroke-dasharray: 4 5; }
+	.barrier.open { stroke: var(--green); stroke-dasharray: none; opacity: .8; }
+	aside {
+		width: 300px; border-left: 1px solid var(--line); background: var(--panel2);
+		display: flex; flex-direction: column; min-height: 0;
+	}
+	aside h3 { font-size: 12px; color: var(--dim); padding: 10px 14px 6px; letter-spacing: 1px; }
+	#log { flex: 1; overflow-y: auto; padding: 0 14px 14px; font-size: 11.5px; font-family: ui-monospace, Menlo, monospace; }
+	#log .ln { padding: 2px 0; border-bottom: 1px dashed #16233c; color: var(--dim); }
+	#log .t { color: var(--faint); margin-right: 6px; }
+	#log .e-plan { color: #93c5fd; } #log .e-wave { color: #c4b5fd; }
+	#log .e-ok { color: #6ee7b7; } #log .e-violation, #log .e-retry { color: #fcd34d; }
+	#log .e-skip { color: var(--faint); } #log .e-failed { color: #fca5a5; }
+	#log .e-done { color: #a5f3fc; font-weight: 700; }
+	#history { flex: 1; overflow-y: auto; padding: 4px 10px; }
+	#history .item { padding: 8px 10px; border-radius: 8px; cursor: pointer; color: var(--dim); }
+	#history .item:hover { background: #16233c; }
+	#history .item.on { background: #16233c; color: var(--txt); }
+	#paste { flex: 1; display: flex; flex-direction: column; padding: 10px 14px; gap: 8px; }
+	#paste textarea { flex: 1; background: #0a1120; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 10px; font: 11px ui-monospace, Menlo, monospace; resize: none; }
+	button {
+		background: #16233c; color: var(--txt); border: 1px solid #274066; border-radius: 8px;
+		padding: 6px 14px; cursor: pointer; font-size: 12px;
+	}
+	button:hover { background: #1d3050; }
+	#empty { color: var(--faint); text-align: center; margin-top: 80px; line-height: 2; }
+	#empty code { background: #16233c; padding: 2px 8px; border-radius: 6px; color: #93c5fd; }
+	.foot { color: var(--faint); font-size: 11px; padding: 5px 18px; border-top: 1px solid var(--line); background: var(--panel2); }
+</style>
+</head>
+<body>
+<header>
+	<div class="logo">pi-graph<em>-tool</em></div>
+	<div class="tag">graph_run 执行追踪 · Wave 调度可视化</div>
+	<tabs>
+		<div class="tab on" data-m="live">实时</div>
+		<div class="tab" data-m="history">历史</div>
+		<div class="tab" data-m="paste">粘贴回放</div>
+	</tabs>
+	<div class="dot" id="dot" title="连接状态"></div>
+</header>
+<div id="stats"></div>
+<main>
+	<div id="canvasWrap"><div id="empty">等待事件……<br>任务侧设置 <code>PI_GRAPH_TRACE_DIR</code> 后调用 graph_run，图会在这里实时生长</div></div>
+	<aside>
+		<h3 id="asideTitle">事件流</h3>
+		<div id="log"></div>
+		<div id="history" style="display:none"></div>
+		<div id="paste" style="display:none">
+			<textarea id="pasteBox" placeholder='粘贴 graph_run 结果里的 details JSON（含 waves / edges / nodes / waveSeconds），即可离线重建视图'></textarea>
+			<button id="pasteGo">解析并渲染</button>
+		</div>
+	</aside>
+</main>
+<div class="foot">数据源：PI_GRAPH_TRACE_DIR 的 JSONL 事件流 · 服务器：<code>node ui/server.mjs</code></div>
+
+<script>
+"use strict";
+// ============ 状态模型：事件流 → 单一 state，渲染纯函数式重建 ============
+const S = {
+	plan: null,            // {nodes:[], edges:[], waves:[], inferred:[]}
+	node: new Map(),       // id -> {status:'pending|running|ok|retry|failed|skipped', seconds, chars, retried, salvaged, reason, startTs}
+	wave: [],              // 每波 {ids:[], startTs, endTs, open:false}
+	t0: 0, done: null, runName: "",
+};
+const $ = (s) => document.querySelector(s);
+const stat = (id) => S.node.get(id);
+
+function reset(runName) {
+	S.plan = null; S.node = new Map(); S.wave = []; S.t0 = 0; S.done = null; S.runName = runName || "";
+	$("#log").innerHTML = ""; $("#empty").style.display = "block"; $("#canvasWrap").querySelector("svg")?.remove();
+	renderStats();
+}
+
+function logLine(cls, label, rel) {
+	const el = document.createElement("div");
+	el.className = "ln " + cls;
+	const t = rel !== undefined ? ((rel / 1000).toFixed(1) + "s") : "";
+	el.innerHTML = `<span class="t">${t}</span>${label}`;
+	const box = $("#log");
+	box.prepend(el);
+	while (box.children.length > 250) box.lastChild.remove();
+}
+
+function applyEvent(ev) {
+	const rel = S.t0 ? ev.ts - S.t0 : 0;
+	switch (ev.t) {
+		case "plan": {
+			S.plan = ev; S.t0 = ev.ts;
+			for (const n of ev.nodes) S.node.set(n.id, { status: "pending" });
+			S.wave = ev.waves.map((ids) => ({ ids, startTs: 0, endTs: 0, open: false }));
+			const inferred = new Set((ev.inferredEdges || []).map((e) => e.from + ">" + e.to));
+			S.plan.edgeKind = new Map(ev.edges.map((e) => [e.from + ">" + e.to, inferred.has(e.from + ">" + e.to) ? "inferred" : "explicit"]));
+			logLine("e-plan", `图规划：${ev.nodes.length} 节点 / ${ev.waves.length} Wave / ${ev.edges.length} 边` + (inferred.size ? `（隐式推断 ${inferred.size}）` : ""));
+			break;
+		}
+		case "wave_start": {
+			const w = S.wave[ev.wave - 1];
+			if (w) { w.startTs = ev.ts; w.open = true; for (const id of ev.nodes) { const n = stat(id); if (n) { n.status = "running"; n.startTs = ev.ts; } } }
+			logLine("e-wave", `Wave ${ev.wave}/${ev.total} 启动：${ev.nodes.length} 个子代理并行`, rel);
+			break;
+		}
+		case "node_ok": {
+			const n = stat(ev.id); if (!n) break;
+			Object.assign(n, { status: "ok", seconds: ev.seconds, chars: ev.chars, retried: !!ev.retried, salvaged: ev.salvaged });
+			logLine("e-ok", `✓ [${ev.id}] 完成 ${ev.seconds}s · ${ev.chars} 字` + (ev.retried ? `（重试挽回${ev.salvaged === "first" ? "·沿用首答" : ""}）` : ""), rel);
+			break;
+		}
+		case "violation": {
+			const n = stat(ev.id); if (n) n.status = "retry";
+			logLine("e-violation", `⚠ [${ev.id}] 违约：${ev.reason}`, rel);
+			break;
+		}
+		case "retry_start": {
+			const n = stat(ev.id); if (n) n.status = "retry";
+			logLine("e-retry", `↻ [${ev.id}] 隔离重试（不重跑整波）`, rel);
+			break;
+		}
+		case "node_failed": {
+			const n = stat(ev.id); if (n) { n.status = "failed"; n.reason = ev.reason; }
+			logLine("e-failed", `✗ [${ev.id}] 失败：${ev.reason}`, rel);
+			break;
+		}
+		case "skip": {
+			const n = stat(ev.id); if (n) { n.status = "skipped"; n.reason = ev.reason; }
+			logLine("e-skip", `⏭ [${ev.id}] 级联跳过：${ev.reason}`, rel);
+			break;
+		}
+		case "wave_end": {
+			const w = S.wave[ev.wave - 1]; if (w) { w.endTs = ev.ts; w.open = false; }
+			logLine("e-wave", `— Wave ${ev.wave} 屏障放行 —`, rel);
+			break;
+		}
+		case "abort": logLine("e-failed", "检测到中止信号：剩余节点全部跳过", rel); break;
+		case "done": {
+			S.done = ev;
+			logLine("e-done", `图执行完成：${ev.ok}/${ev.total} 成功 · ${ev.waveSeconds}s${ev.violations ? ` · 违约重试 ${ev.violations}` : ""}${ev.skipped ? ` · 跳过 ${ev.skipped}` : ""}`, rel);
+			break;
+		}
+		case "new_run": return; // 服务器收流让 EventSource 重连，无需处理
+	}
+	renderStats();
+	if (S.plan) { $("#empty").style.display = "none"; render(); }
+}
+
+function renderStats() {
+	const parts = [];
+	if (S.plan) {
+		const ok = [...S.node.values()].filter((n) => n.status === "ok").length;
+		const fail = [...S.node.values()].filter((n) => n.status === "failed").length;
+		const skip = [...S.node.values()].filter((n) => n.status === "skipped").length;
+		parts.push(`节点 <b>${ok}</b> ok / ${S.plan.nodes.length}` + (fail ? ` · <b>${fail}</b> 失败` : "") + (skip ? ` · <b>${skip}</b> 跳过` : ""));
+		parts.push(`Wave <b>${S.plan.waves.length}</b>`);
+		const running = [...S.node.values()].some((n) => n.status === "running" || n.status === "retry");
+		parts.push(`墙钟 <b>${S.done ? S.done.waveSeconds + "s" : running ? "…" : "—"}</b>`);
+		if (S.runName) parts.push(`<span style="color:var(--faint)">${S.runName}</span>`);
+	}
+	$("#stats").innerHTML = parts.map((p) => `<span class="chip">${p}</span>`).join("");
+}
+
+// ============ SVG 渲染 ============
+const NS = "http://www.w3.org/2000/svg";
+const el = (tag, attrs, text) => {
+	const e = document.createElementNS(NS, tag);
+	for (const [k, v] of Object.entries(attrs || {})) e.setAttribute(k, v);
+	if (text !== undefined) e.textContent = text;
+	return e;
+};
+const NODE_W = 210, NODE_H = 64, COL_GAP = 110, ROW_GAP = 18;
+
+function render() {
+	$("#canvasWrap").querySelector("svg")?.remove();
+	if (!S.plan) return;
+	const cols = S.plan.waves.map((ids) => ids.map((id) => S.plan.nodes.find((n) => n.id === id)));
+	const colH = (n) => n * NODE_H + (n - 1) * ROW_GAP;
+	const H = Math.max(...cols.map((c) => colH(c.length)), 200) + 140;
+	const W = cols.length * (NODE_W + COL_GAP) + 90;
+	const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: Math.max(W, $("#canvasWrap").clientWidth - 52), height: H });
+	const X = [], Y = new Map();
+	cols.forEach((col, ci) => {
+		const x = 50 + ci * (NODE_W + COL_GAP);
+		X[ci] = x;
+		const totalH = colH(col.length);
+		svg.append(el("rect", { x: x - 22, y: 46, width: NODE_W + 44, height: totalH + 48, rx: 12, fill: "#0e1729", stroke: "#1c2a44" }));
+		svg.append(el("text", { x, y: 68, class: "wave-label" }, `WAVE ${ci + 1} · ${col.length} 节点`));
+		col.forEach((n, ri) => {
+			const y = 92 + (H - 120 - totalH) / 2 + ri * (NODE_H + ROW_GAP);
+			Y.set(n.id, { x, y });
+		});
+	});
+	// 边（defs 必须先入树，marker 引用才生效）
+	const defs = el("defs", {});
+	defs.innerHTML = `<marker id="arw" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 z" fill="#33507a"/></marker>`;
+	svg.append(defs);
+	for (const e of S.plan.edges) {
+		const a = Y.get(e.from), b = Y.get(e.to);
+		if (!a || !b) continue;
+		const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2;
+		const mx = (x1 + x2) / 2;
+		const kind = S.plan.edgeKind.get(e.from + ">" + e.to);
+		svg.append(el("path", { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 4},${y2}`, class: `edge ${kind === "inferred" ? "inferred" : ""}`, "marker-end": "url(#arw)" }));
+	}
+	// 屏障线（波间）
+	for (let ci = 1; ci < cols.length; ci++) {
+		const x = X[ci] - 45;
+		const w = S.wave[ci - 1];
+		const open = w && w.startTs && !w.open;
+		svg.append(el("line", { x1: x, y1: 60, x2: x, y2: H - 60, class: "barrier" + (open ? " open" : "") }));
+		svg.append(el("text", { x: x + 6, y: 74, "font-size": 10, fill: open ? "#10b981" : "#475569" }, open ? "屏障 ✓" : "屏障"));
+	}
+	// 节点
+	for (const n of S.plan.nodes) {
+		const pos = Y.get(n.id), st = stat(n.id) || { status: "pending" };
+		const g = el("g", { class: `node st-${st.status === "running" || st.status === "retry" ? st.status : st.status}` });
+		if (st.status === "running" || st.status === "retry") g.setAttribute("class", `node st-${st.status} pulse`);
+		g.append(el("rect", { x: pos.x, y: pos.y, width: NODE_W, height: NODE_H, rx: 10 }));
+		let meta = "";
+		if (st.status === "ok") meta = `${st.seconds}s · ${st.chars} 字${st.retried ? " · 重试挽回" : ""}`;
+		else if (st.status === "running" || st.status === "retry") {
+			if (st.startTs) { meta = "运行中"; g.dataset.id = n.id; }
+			else meta = "排队中";
+		}
+		else if (st.status === "failed") meta = "失败：" + (st.reason || "").slice(0, 22);
+		else if (st.status === "skipped") meta = "跳过：" + (st.reason || "").slice(0, 20);
+		else meta = "待执行";
+		const badge = n.tools && n.tools.length ? ` ⚙${n.tools.join("/")}` : "";
+		g.append(el("text", { x: pos.x + 14, y: pos.y + 24, class: "n-id" }, `${n.id}`));
+		g.append(el("text", { x: pos.x + 14, y: pos.y + 42, class: "n-title" }, `${n.title}${badge}`.slice(0, 24)));
+		const metaEl = el("text", { x: pos.x + 14, y: pos.y + 57, class: "n-meta" }, meta);
+		if (st.status === "ok") metaEl.setAttribute("fill", "#6ee7b7");
+		if (st.status === "failed") metaEl.setAttribute("fill", "#fca5a5");
+		if (st.status === "running" || st.status === "retry") { metaEl.setAttribute("fill", st.status === "retry" ? "#fcd34d" : "#93c5fd"); metaEl.dataset.timer = n.id; metaEl.dataset.start = st.startTs; }
+		g.append(metaEl);
+		svg.append(g);
+	}
+	$("#canvasWrap").append(svg);
+}
+
+// 运行中节点的实时计时
+setInterval(() => {
+	for (const t of document.querySelectorAll("[data-timer]")) {
+		const st = stat(t.dataset.timer);
+		if (!st) continue;
+		if (st.status === "running" && st.startTs) t.textContent = `运行中 ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
+		else if (st.status === "retry" && st.startTs) t.textContent = `挽回重试 ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
+	}
+}, 250);
+
+// ============ 三种视图：实时 / 历史 / 粘贴 ============
+let es = null;
+function connectLive() {
+	es?.close();
+	es = new EventSource("/events");
+	es.onopen = () => { $("#dot").className = "dot live"; };
+	es.onerror = () => { $("#dot").className = "dot wait"; };
+	es.onmessage = (m) => {
+		try {
+			const ev = JSON.parse(m.data);
+			if (ev.t === "new_run") return; // 服务器已收流，EventSource 会自动重连
+			if (ev.t === "plan" && S.runName && ev.run !== S.runName) reset(ev.run);
+			if (!S.runName && ev.run) { reset(ev.run); $("#dot").className = "dot live"; }
+			applyEvent(ev);
+		} catch (e) { console.error("[graph-ui] 事件处理失败：", e); }
+	};
+}
+
+async function loadHistory() {
+	const runs = await (await fetch("/api/runs")).json();
+	const box = $("#history");
+	box.innerHTML = runs.length ? "" : '<div style="color:var(--faint);padding:14px">暂无历史 run</div>';
+	for (const r of runs) {
+		const item = document.createElement("div");
+		item.className = "item";
+		const d = new Date(r.mtime);
+		item.innerHTML = `<b>${r.name.replace(".jsonl", "").slice(4, 19)}</b><br>${(r.size / 1024).toFixed(1)} KB · ${d.toLocaleTimeString()}`;
+		item.onclick = async () => {
+			box.querySelectorAll(".item").forEach((x) => x.classList.remove("on"));
+			item.classList.add("on");
+			reset(r.name);
+			const lines = (await (await fetch("/api/run/" + r.name)).text()).split("\n").filter(Boolean);
+			for (const ln of lines) { try { applyEvent(JSON.parse(ln)); } catch {} }
+		};
+		box.append(item);
+	}
+}
+
+$("#pasteGo").onclick = () => {
+	const raw = $("#pasteBox").value;
+	const first = raw.indexOf("{"), last = raw.lastIndexOf("}");
+	if (first < 0) return alert("未找到 JSON 对象");
+	let d; try { d = JSON.parse(raw.slice(first, last + 1)); } catch (e) { return alert("JSON 解析失败：" + e.message); }
+	if (!Array.isArray(d.waves) || !Array.isArray(d.nodes)) return alert("缺少 waves/nodes 字段——请粘贴 graph_run 结果中的 details 对象");
+	reset("粘贴回放");
+	const now = Date.now();
+	const feed = (t, extra, dt) => { const ev = { t, ts: now + dt, ...extra }; applyEvent(ev); };
+	feed("plan", {
+		nodes: d.nodes.map((n) => ({ id: n.id, title: n.title, wave: n.wave, dependsOn: [], tools: [] })),
+		waves: d.waves, edges: d.edges || [], inferredEdges: [],
+	}, 0);
+	const viol = new Map((d.violations || []).map((v) => [v.id, v]));
+	let dt = 100;
+	for (let w = 0; w < d.waves.length; w++) {
+		feed("wave_start", { wave: w + 1, total: d.waves.length, nodes: d.waves[w] }, dt); dt += 50;
+		for (const id of d.waves[w]) {
+			const n = d.nodes.find((x) => x.id === id); if (!n) continue;
+			if (n.status === "ok") {
+				if (n.retried && viol.has(id)) { feed("violation", { id, reason: viol.get(id).reason }, dt); dt += 50; }
+				feed("node_ok", { id, seconds: n.seconds, chars: n.chars, retried: n.retried, salvaged: "retry" }, dt); dt += 50;
+			} else if (n.status === "skipped") feed("skip", { id, reason: n.skipReason || "上游未成功" }, dt);
+			else feed("node_failed", { id, reason: "两次尝试均无有效输出" }, dt);
+			dt += 50;
+		}
+		feed("wave_end", { wave: w + 1 }, dt); dt += 80;
+	}
+	feed("done", { ok: d.nodes.filter((n) => n.status === "ok").length, failed: d.nodes.filter((n) => n.status === "failed").length, skipped: d.nodes.filter((n) => n.status === "skipped").length, total: d.nodes.length, waveSeconds: d.waveSeconds, violations: (d.violations || []).length }, dt);
+};
+
+document.querySelectorAll(".tab").forEach((tab) => {
+	tab.onclick = () => {
+		document.querySelectorAll(".tab").forEach((x) => x.classList.remove("on"));
+		tab.classList.add("on");
+		const m = tab.dataset.m;
+		$("#log").style.display = m === "live" ? "" : "none";
+		$("#history").style.display = m === "history" ? "" : "none";
+		$("#paste").style.display = m === "paste" ? "" : "none";
+		$("#asideTitle").textContent = m === "live" ? "事件流" : m === "history" ? "历史 run" : "离线回放";
+		if (m === "history") loadHistory();
+		if (m === "live") { es?.close(); reset(""); connectLive(); }
+	};
+});
+connectLive();
+</script>
+</body>
+</html>

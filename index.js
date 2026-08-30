@@ -32,6 +32,11 @@
  *   - 重试语义软化：阈值只触发"一次挽回机会"，重试后【非空即接受】——
  *                            简洁但合法的输出不再被误杀（F3：视觉 QA 4/6 误判违约）
  *   设计原则：全局 env 退为默认值，任务异构性由每节点档案表达
+ * v0.2.4 执行追踪出口（配套 ui/ 可视化）：
+ *   - 设置 PI_GRAPH_TRACE_DIR 后，每次 graph_run 把执行过程以 JSONL 事件流落盘
+ *     （plan / wave_start / node_ok / violation / retry / skip / done），
+ *     `node ui/server.mjs` 读取这些事件实时渲染 Wave 调度动画
+ *   - 默认关闭、全程 try/catch 包裹：追踪永不影响图执行本身
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -101,6 +106,27 @@ const MAX_SUBTASKS = 12; // 入参护栏：防过猛 fan-out 触发限流
 //   视觉判定/是否类等天然简短的任务，按节点设 minOutputChars: 0 即豁免。
 const MIN_OUTPUT_CHARS = intEnv("PI_GRAPH_MIN_OUTPUT_CHARS", 20);
 
+// ---- v0.2.4 执行追踪：把 graph_run 的执行过程以 JSONL 事件流落盘，供 ui/ 实时可视化 ----
+// 用法：export PI_GRAPH_TRACE_DIR=/tmp/pgt-traces（目录不存在会自动创建）
+// 设计约束：①默认关闭（不设 env 完全零开销零副作用）②任何异常就地吞掉——
+//           追踪通道挂了也绝不影响图执行本身 ③文件句柄 unref，不拖住进程退出
+let traceRunId = null;
+function trace(ev) {
+	try {
+		const dir = process.env.PI_GRAPH_TRACE_DIR;
+		if (!dir) return;
+		if (traceStream === null) {
+			traceRunId = `run-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+			fs.mkdirSync(dir, { recursive: true });
+			traceStream = fs.createWriteStream(path.join(dir, `${traceRunId}.jsonl`), { flags: "a" });
+			traceStream.on("error", () => { try { traceStream.destroy(); } catch {} traceStream = false; });
+			traceStream.on("close", () => { traceStream = false; });
+		}
+		if (traceStream) traceStream.write(JSON.stringify({ ts: Date.now(), run: traceRunId, ...ev }) + "\n");
+	} catch {}
+}
+let traceStream = null; // null=未初始化 | false=不可用 | WriteStream=可用
+
 // {{id}} 占位符：匹配 {{ research }} / {{n1}} 等；未命中任何节点 id 时原样保留
 const PLACEHOLDER_RE = /\{\{\s*([^{}\s]+)\s*\}\}/g;
 
@@ -139,11 +165,13 @@ function planGraph(raw, log) {
 	}
 
 	// 隐式边推断：prompt 里引用了 {{id}} 却没声明依赖 → 自动补边（LLM 常忘写 dependsOn）
+	const inferredEdges = [];
 	for (const n of nodes) {
 		for (const m of n.prompt.matchAll(PLACEHOLDER_RE)) {
 			const ref = m[1];
 			if (byId.has(ref) && ref !== n.id && !n.dependsOn.includes(ref)) {
 				n.dependsOn.push(ref);
+				inferredEdges.push({ from: ref, to: n.id });
 				log(`边推断："${n.id}" 的 prompt 引用了 {{${ref}}} → 自动补充依赖边`);
 			}
 		}
@@ -166,7 +194,7 @@ function planGraph(raw, log) {
 		}
 		waves.push(wave);
 	}
-	return { nodes, byId, waves };
+	return { nodes, byId, waves, inferredEdges };
 }
 
 // ---- 数据路由：把 {{id}} 替换为上游节点输出（带定界符与截断，防子代理上下文膨胀）----
@@ -289,6 +317,16 @@ export default function (pi) {
 			const { nodes, byId, waves } = plan;
 
 			log(`图规划完成：${nodes.length} 个节点 / ${waves.length} 个 Wave / ${nodes.reduce((s, n) => s + n.dependsOn.length, 0)} 条边`);
+			trace({
+				t: "plan",
+				nodes: nodes.map((n) => ({
+					id: n.id, title: n.title, wave: n.wave + 1, dependsOn: [...n.dependsOn],
+					tools: n.tools ?? [], minOutputChars: n.minOutputChars ?? MIN_OUTPUT_CHARS, outputCap: n.outputCap ?? OUTPUT_CAP, workdir: n.workdir,
+				})),
+				waves: waves.map((wave) => wave.map((n) => n.id)),
+				edges: nodes.flatMap((n) => n.dependsOn.map((d) => ({ from: d, to: n.id }))),
+				inferredEdges: plan.inferredEdges,
+			});
 
 			const violationsTotal = [];
 
@@ -303,6 +341,7 @@ export default function (pi) {
 						}
 					}
 					log("检测到中止信号：跳过所有剩余节点");
+					trace({ t: "abort" });
 					break;
 				}
 				// 失败级联：上游非 ok（失败或被跳过）的节点标记 skipped，本波不执行
@@ -312,6 +351,7 @@ export default function (pi) {
 						n.status = "skipped";
 						n.skipReason = `上游 ${bad.join("、")} 未成功`;
 						log(`⏭️ [${n.title}] 跳过：${n.skipReason}`);
+						trace({ t: "skip", id: n.id, reason: n.skipReason });
 					}
 				}
 				const batch = waves[w].filter((n) => n.status === "pending");
@@ -319,6 +359,7 @@ export default function (pi) {
 
 				log(`Wave ${w + 1}/${waves.length} 启动：${batch.length} 个子代理并行` +
 					(batch.some((n) => n.tools?.length) ? `（含工具节点：${batch.filter((n) => n.tools?.length).map((n) => `${n.id}[${n.tools.join("/")}]`).join("、")}）` : ""));
+				trace({ t: "wave_start", wave: w + 1, total: waves.length, nodes: batch.map((n) => n.id), at: Date.now() - t0 });
 				const settled = await Promise.allSettled(
 					batch.map((n) => runSubNode(n, renderPrompt(n, byId), agentDir, signal, modelOverride)),
 				);
@@ -331,6 +372,7 @@ export default function (pi) {
 					if (r.status === "fulfilled" && r.value.text.length > minChars) {
 						n.status = "ok";
 						n.result = r.value;
+						trace({ t: "node_ok", id: n.id, seconds: Number(r.value.seconds.toFixed(1)), chars: r.value.text.length });
 					} else {
 						const reason = r.status === "rejected"
 							? String(r.reason?.message ?? r.reason).slice(0, 100)
@@ -338,6 +380,7 @@ export default function (pi) {
 								? `节点超时（>${Math.round(NODE_TIMEOUT_MS / 1000)}s）`
 								: `输出为空或过短（实际 ${r.value?.text?.length ?? 0} 字 / 阈值 ${minChars}，触发一次挽回重试）`);
 						log(`⚠️ [${n.title}] ${reason} → 仅重试该节点`);
+						trace({ t: "violation", id: n.id, reason, firstChars: r.status === "fulfilled" ? (r.value?.text?.length ?? 0) : 0 });
 						violations.push({ n, reason, firstText: r.status === "fulfilled" ? (r.value?.text ?? "") : "" });
 					}
 				});
@@ -353,6 +396,7 @@ export default function (pi) {
 				await Promise.allSettled(toRetry.map(async ({ n, firstText }) => {
 					try {
 						const nudge = firstText.trim() ? "" : "\n\n注意：请直接以文本形式输出你的回答。";
+						trace({ t: "retry_start", id: n.id });
 						const retry = await runSubNode(n, renderPrompt(n, byId) + nudge, agentDir, signal, modelOverride);
 						const candidates = [retry.text, firstText].filter((t) => t && t.trim().length > 0);
 						if (candidates.length > 0) {
@@ -362,15 +406,19 @@ export default function (pi) {
 							n.status = "ok";
 							n.result = retry;
 							log(`✅ [${n.title}] 重试挽回成功${best === firstText ? "（沿用首答）" : ""}`);
+							trace({ t: "node_ok", id: n.id, seconds: Number(retry.seconds.toFixed(1)), chars: retry.text.length, retried: true, salvaged: best === firstText ? "first" : "retry" });
 						} else {
 							n.status = "failed";
 							log(`❌ [${n.title}] 两次尝试均无有效输出，放弃该节点（其后代将被跳过，不影响其他分支）`);
+							trace({ t: "node_failed", id: n.id, reason: "两次尝试均无有效输出" });
 						}
 					} catch (e) {
 						n.status = "failed";
 						log(`❌ [${n.title}] 重试异常：${String(e?.message ?? e).slice(0, 80)}（其后代将被跳过，不影响其他分支）`);
+						trace({ t: "node_failed", id: n.id, reason: `重试异常：${String(e?.message ?? e).slice(0, 80)}` });
 					}
 				}));
+				trace({ t: "wave_end", wave: w + 1, at: Date.now() - t0 });
 			}
 
 			// 收尾清扫：中止等边界情况下仍为 pending 的节点统一标记为 skipped
@@ -415,6 +463,7 @@ export default function (pi) {
 				sections.join("\n\n");
 
 			log(`图执行完成：${okCount}/${nodes.length} 成功，${waves.length} Wave，${waveSeconds.toFixed(1)}s`);
+			trace({ t: "done", ok: okCount, failed: failedCount, skipped: skippedCount, total: nodes.length, waveSeconds: Number(waveSeconds.toFixed(1)), violations: violationsTotal.length });
 
 			return {
 				content: [{ type: "text", text: summary }],
