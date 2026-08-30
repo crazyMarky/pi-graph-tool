@@ -123,6 +123,8 @@
 <div id="inputBar">
 	<textarea id="msg" placeholder="输入任务（如：帮我调研 React、Vue、Svelte 三个框架，然后对比汇总）→ 回车运行，下方实时长图"></textarea>
 	<button id="go">运行 ▶</button>
+	<button id="stop" title="中止当前任务" style="padding:9px 12px">⏹</button>
+	<button id="fresh" title="重开新会话（清空对话）" style="padding:9px 12px">✚新会话</button>
 	<div id="runState">空闲</div>
 </div>
 <details id="answerWrap"><summary>最终回答（任务完成后展开）</summary><div id="answerBody"></div></details>
@@ -201,10 +203,29 @@ function applyEvent(ev) {
 			logLine("e-done", `图执行完成：${ev.ok}/${ev.total} 成功 · ${ev.waveSeconds}s${ev.violations ? ` · 违约重试 ${ev.violations}` : ""}${ev.skipped ? ` · 跳过 ${ev.skipped}` : ""}`, rel);
 			break;
 		}
+		case "node_delta": {
+			const n = stat(ev.id); if (!n) break;
+			if (ev.kind === "tool") (n.tools = n.tools || []).push(ev.tool);
+			else if (ev.kind === "text") n.stream = (n.stream || "") + ev.delta;
+			liveTick(ev.id);
+			return;
+		}
 		case "new_run": return;
 	}
 	renderStats();
 	if (S.plan) { $("#empty").style.display = "none"; render(); }
+	if (curDetail && (ev.t === "node_ok" || ev.t === "violation" || ev.t === "skip" || ev.t === "node_failed") && stat(curDetail)) {
+		const pn = S.plan?.nodes.find((x) => x.id === curDetail);
+		if (pn) showDetail(pn);
+	}
+}
+let curDetail = null;
+function liveTick(id) {
+	const n = stat(id); if (!n) return;
+	if (curDetail === id) {
+		const b = document.getElementById("liveBody");
+		if (b) { b.textContent = n.stream || "（等待首个增量…）"; b.scrollTop = b.scrollHeight; }
+	}
 }
 function renderStats() {
 	const parts = [];
@@ -285,7 +306,10 @@ function render() {
 		else meta = "待执行";
 		const m = el("text", { x: pos.x + 18, y: pos.y + 63, class: "n-meta" }, meta);
 		if (fill) m.setAttribute("fill", fill);
-		if ((st.status === "running" || st.status === "retry") && st.startTs) { m.dataset.timer = n.id; m.dataset.base = meta; }
+		if ((st.status === "running" || st.status === "retry")) {
+			if (st.startTs) { m.dataset.timer = n.id; m.dataset.base = meta; }
+			m.dataset.live = n.id; m.dataset.base = m.dataset.base || meta;
+		}
 		g.append(m);
 		g.addEventListener("click", () => showDetail(n));
 		svg.append(g);
@@ -293,9 +317,13 @@ function render() {
 	$("#canvasWrap").append(svg);
 }
 setInterval(() => {
-	for (const t of document.querySelectorAll("[data-timer]")) {
-		const st = stat(t.dataset.timer);
-		if (st && st.startTs) t.textContent = `${t.dataset.base} ${((Date.now() - st.startTs) / 1000).toFixed(0)}s`;
+	for (const t of document.querySelectorAll("[data-live]")) {
+		const st = stat(t.dataset.live); if (!st) continue;
+		const sec = st.startTs ? ` ${((Date.now() - st.startTs) / 1000).toFixed(0)}s` : "";
+		const gen = st.stream ? ` · 已生成 ${st.stream.length} 字` : "";
+		const tool = st.tools?.length ? ` · ${st.tools[st.tools.length - 1]}` : "";
+		t.textContent = `${t.dataset.base}${sec}${gen}${tool}`;
+		t.setAttribute("fill", st.status === "retry" ? "#fcd34d" : "#93c5fd");
 	}
 }, 250);
 
@@ -310,9 +338,10 @@ function showDetail(n) {
 	if (prof.workdir) chips.push(`目录 ${prof.workdir}`);
 	const dep = (prof.dependsOn || []).join("、");
 	$("#detail").innerHTML = `
-		<div class="hd"><span>${ICON[st.status] || "○"}</span><b>${n.id}</b><span style="color:var(--dim)">${n.title}</span><span class="x" onclick="document.getElementById('detail').style.display='none'">✕</span></div>
+		<div class="hd"><span>${ICON[st.status] || "○"}</span><b>${n.id}</b><span style="color:var(--dim)">${n.title}</span><span class="x" onclick="window.closeDetail()">✕</span></div>
 		<div class="sec"><h4>输入 · PROMPT（{{id}} 运行前已替换为上游输出）</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
-		${st.text ? `<div class="sec"><h4>产出 · 前 2000 字（共 ${st.chars} 字，${st.seconds}s${st.retried ? " · 重试挽回" : ""}）</h4><div class="body">${esc(st.text)}</div></div>` : ""}
+		${st.status === "running" || st.status === "retry" ? `<div class="sec"><h4>过程 · 实时流${st.tools?.length ? `（工具：${st.tools.join(" → ")}）` : ""}</h4><div class="body" id="liveBody">${esc(st.stream || "（等待首个增量…）")}</div></div>` : ""}
+		${st.text ? `<div class="sec"><h4>产出 · 全文（共 ${st.chars} 字，${st.seconds}s${st.retried ? " · 重试挽回" : ""}）</h4><div class="body">${esc(st.text)}</div></div>` : ""}
 		${st.status === "skipped" || st.status === "failed" ? `<div class="sec"><h4>状态说明</h4><div class="body">${esc((st.reason || st.violReason || ""))}</div></div>` : ""}
 		<div class="sec"><h4>节点档案${dep ? ` · 依赖：${dep}` : ""}</h4><div class="kv">${chips.length ? chips.map((c) => `<span>${c}</span>`).join("") : '<span>默认（纯 LLM · 无工具）</span>'}</div></div>`;
 	$("#detail").style.display = "block";
@@ -323,21 +352,27 @@ const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").
 $("#msg").addEventListener("keydown", (e) => {
 	if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#go").click(); }
 });
+$("#stop").onclick = () => { fetch("/abort", { method: "POST" }).catch(() => {}); $("#runState").textContent = "已发中止"; };
+$("#fresh").onclick = async () => { await fetch("/new", { method: "POST" }).catch(() => {}); $("#answerWrap").style.display = "none"; $("#runState").textContent = "新会话"; reset(""); connectLive(); };
+window.closeDetail = () => { $("#detail").style.display = "none"; curDetail = null; };
 $("#go").onclick = async () => {
 	const message = $("#msg").value.trim();
 	if (!message) return;
 	$("#go").disabled = true; $("#runState").textContent = "运行中…";
-	$("#answerWrap").style.display = "none";
+	$("#answerWrap").style.display = "block"; $("#answerWrap").open = true;
+	$("#answerBody").textContent = "…";
+	const poll = setInterval(async () => {
+		try {
+			const s2 = await (await fetch("/api/session")).json();
+			if (s2.stream) { $("#answerBody").textContent = s2.stream; $("#answerBody").scrollTop = 1e6; }
+		} catch {}
+	}, 900);
+	setTimeout(() => clearInterval(poll), 15 * 60_000);
 	try {
 		const r = await fetch("/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) });
 		const d = await r.json();
-		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); return; }
-		const text = (d.stdout || "").trim();
-		$("#answerBody").textContent = text || "（无输出）";
-		$("#answerWrap").style.display = "block"; $("#answerWrap").open = true;
-		$("#runState").textContent = "完成";
-	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); }
-	$("#go").disabled = false;
+		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); $("#go").disabled = false; return; }
+	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); $("#go").disabled = false; }
 };
 
 // ============ 视图切换 / 实时 / 历史 / 粘贴 ============

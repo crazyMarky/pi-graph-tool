@@ -37,7 +37,8 @@
  *     （plan / wave_start / node_ok / violation / retry / skip / done），
  *     `node ui/server.mjs` 读取这些事件实时渲染 Wave 调度动画
  *   - 默认关闭、全程 try/catch 包裹：追踪永不影响图执行本身
- *   - 注意：trace 含各节点 prompt 与产出文本（产出截断至 2000 字），目录请勿外传
+ *   - v0.3.0：node_delta 事件实时流式节点过程（文本增量 120ms 合并 + 工具调用），
+ *     产出全文不再截断。注意：trace 含 prompt 与产出全文，目录请勿外传
  *
  * 安装位置：<项目>/.pi/extensions/pi-graph-tool/index.js（项目级，自动加载）
  *
@@ -217,7 +218,7 @@ function renderPrompt(node, byId) {
 //   声明 tools 白名单：只启用列出的工具（如 read/bash），graph_run 被结构性排除——
 //     双保险：白名单不含它 + excludeTools 显式禁用，递归防护不弱于全禁方案
 //   声明 workdir：工具节点在独立目录工作，避免并行 write/bash 互相踩踏
-async function runSubNode(node, prompt, agentDir, signal, modelOverride) {
+async function runSubNode(node, prompt, agentDir, signal, modelOverride, onEvent) {
 	const t0 = Date.now();
 	const sessionOpts = {
 		agentDir,
@@ -236,6 +237,23 @@ async function runSubNode(node, prompt, agentDir, signal, modelOverride) {
 	const { session } = await createAgentSession(sessionOpts);
 	const agent = session.agent;
 
+	// v0.3.0 节点级事件流：订阅子代理会话事件，转发文本增量（120ms 合并）与工具调用，
+	// 供 ui/ 实时展示"过程"（node_delta）。onEvent 缺省时零开销。
+	let buf = "", bufTimer = null;
+	const unsubscribe = onEvent ? session.subscribe((ev) => {
+		try {
+			if (ev.type === "message_update" && ev.assistantMessageEvent?.type === "text_delta") {
+				buf += ev.assistantMessageEvent.delta ?? "";
+				if (!bufTimer) bufTimer = setTimeout(() => {
+					bufTimer = null;
+					if (buf) { onEvent({ kind: "text", delta: buf }); buf = ""; }
+				}, 120);
+			} else if (ev.type === "tool_execution_start") {
+				onEvent({ kind: "tool", tool: ev.toolName });
+			}
+		} catch {}
+	}) : null;
+
 	// 中止传播：主工具调用被 abort 时，杀掉子代理
 	const onAbort = () => { try { agent.abort(); } catch {} };
 	signal?.addEventListener("abort", onAbort, { once: true });
@@ -248,6 +266,8 @@ async function runSubNode(node, prompt, agentDir, signal, modelOverride) {
 		await agent.prompt(prompt);
 	} finally {
 		clearTimeout(timer);
+		if (bufTimer) { clearTimeout(bufTimer); if (buf && onEvent) { try { onEvent({ kind: "text", delta: buf }); } catch {} } }
+		try { unsubscribe?.(); } catch {}
 		signal?.removeEventListener("abort", onAbort);
 	}
 	return { title: node.title, text: lastText(session.messages), seconds: (Date.now() - t0) / 1000, timedOut };
@@ -362,7 +382,7 @@ export default function (pi) {
 					(batch.some((n) => n.tools?.length) ? `（含工具节点：${batch.filter((n) => n.tools?.length).map((n) => `${n.id}[${n.tools.join("/")}]`).join("、")}）` : ""));
 				trace({ t: "wave_start", wave: w + 1, total: waves.length, nodes: batch.map((n) => n.id), at: Date.now() - t0 });
 				const settled = await Promise.allSettled(
-					batch.map((n) => runSubNode(n, renderPrompt(n, byId), agentDir, signal, modelOverride)),
+					batch.map((n) => runSubNode(n, renderPrompt(n, byId), agentDir, signal, modelOverride, (e) => trace({ t: "node_delta", id: n.id, ...e }))),
 				);
 
 				// 契约校验：输出超过（节点阈值 ?? 全局阈值）才算首过履约；否则单独重试（不重跑整波）
@@ -373,7 +393,7 @@ export default function (pi) {
 					if (r.status === "fulfilled" && r.value.text.length > minChars) {
 						n.status = "ok";
 						n.result = r.value;
-						trace({ t: "node_ok", id: n.id, seconds: Number(r.value.seconds.toFixed(1)), chars: r.value.text.length, text: r.value.text.slice(0, 2000) });
+						trace({ t: "node_ok", id: n.id, seconds: Number(r.value.seconds.toFixed(1)), chars: r.value.text.length, text: r.value.text });
 					} else {
 						const reason = r.status === "rejected"
 							? String(r.reason?.message ?? r.reason).slice(0, 100)
@@ -398,7 +418,7 @@ export default function (pi) {
 					try {
 						const nudge = firstText.trim() ? "" : "\n\n注意：请直接以文本形式输出你的回答。";
 						trace({ t: "retry_start", id: n.id });
-						const retry = await runSubNode(n, renderPrompt(n, byId) + nudge, agentDir, signal, modelOverride);
+						const retry = await runSubNode(n, renderPrompt(n, byId) + nudge, agentDir, signal, modelOverride, (e) => trace({ t: "node_delta", id: n.id, retry: true, ...e }));
 						const candidates = [retry.text, firstText].filter((t) => t && t.trim().length > 0);
 						if (candidates.length > 0) {
 							const best = candidates.reduce((a, b) => (b.length > a.length ? b : a));
@@ -407,7 +427,7 @@ export default function (pi) {
 							n.status = "ok";
 							n.result = retry;
 							log(`✅ [${n.title}] 重试挽回成功${best === firstText ? "（沿用首答）" : ""}`);
-							trace({ t: "node_ok", id: n.id, seconds: Number(retry.seconds.toFixed(1)), chars: retry.text.length, text: retry.text.slice(0, 2000), retried: true, salvaged: best === firstText ? "first" : "retry" });
+							trace({ t: "node_ok", id: n.id, seconds: Number(retry.seconds.toFixed(1)), chars: retry.text.length, text: retry.text, retried: true, salvaged: best === firstText ? "first" : "retry" });
 						} else {
 							n.status = "failed";
 							log(`❌ [${n.title}] 两次尝试均无有效输出，放弃该节点（其后代将被跳过，不影响其他分支）`);

@@ -17,6 +17,8 @@
  *   GET /                     → 可视化页面（ui/index.html）
  *   GET /api/runs             → 历史 run 列表（按时间倒序）
  *   GET /api/run/:name        → 单个 run 的完整 JSONL
+ *   POST /run {message}       → 持久 rpc 桥发送 prompt（多轮对话），返回主会话回答
+ *   POST /abort | /new        → 中止当前任务 | 重开新会话（杀死 rpc 子进程）
  *   GET /events[?run=name]    → SSE 实时流；缺省跟随最新 run，
  *                               出现更新的 run 时以 new_run 事件收流，
  *                               浏览器 EventSource 自动重连切到新 run
@@ -98,26 +100,80 @@ function streamRun(req, res, file) {
 	}
 }
 
-// ---- 输入框后端：无头跑一次 pi，产出 trace 由 /events 跟随，最终回答返回给页面 ----
-let running = null;
-function startRun(message, res) {
-	if (running) return json(res, 409, { error: "已有任务在运行，请等它结束" });
-	const args = ["-p", message, "--no-session"];
+// ---- 输入框后端：持久 pi rpc 桥（多轮对话），graph 过程由 trace/SSE 跟随 ----
+const bridge = { proc: null, nextId: 1, pending: new Map(), alive: false, answer: "", stream: "", busy: false, error: "" };
+let settleWaiter = null;
+
+function bridgeStart() {
+	if (bridge.alive) return;
+	const args = ["--mode", "rpc", "--no-session"];
 	if (RUN_MODEL) args.push("--model", RUN_MODEL);
-	const proc = spawn("pi", args, { cwd: RUN_CWD, env: process.env, stdio: ["ignore", "pipe", "pipe"] });
-	let out = "", err = "";
-	proc.stdout.on("data", (d) => { out += d; });
-	proc.stderr.on("data", (d) => { err += d; });
-	const killer = setTimeout(() => { try { proc.kill("SIGKILL"); } catch {} }, 15 * 60_000);
-	running = proc;
-	proc.on("close", (code) => {
-		clearTimeout(killer); running = null;
-		json(res, 200, { code, stdout: out.slice(-20000), stderr: err.slice(-500) });
+	bridge.proc = spawn("pi", args, { cwd: RUN_CWD, env: process.env, stdio: ["pipe", "pipe", "pipe"] });
+	bridge.alive = true; bridge.answer = ""; bridge.stream = "";
+	let buf = "";
+	bridge.proc.stdout.on("data", (d) => {
+		buf += d.toString();
+		let i;
+		while ((i = buf.indexOf("\n")) >= 0) {
+			const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+			if (!line) continue;
+			let j; try { j = JSON.parse(line); } catch { continue; }
+			if (j.type === "agent_settled" && settleWaiter) { const w = settleWaiter; settleWaiter = null; w(); }
+			if (j.type === "response" && j.id !== undefined) {
+				const w = bridge.pending.get(j.id);
+				if (w) { bridge.pending.delete(j.id); w(j); }
+			} else if (j.type === "message_update" && j.assistantMessageEvent?.type === "text_delta") {
+				bridge.stream += j.assistantMessageEvent.delta ?? "";
+			} else if (j.type === "message_end" && j.message?.role === "assistant") {
+				// 主会话回答：取有文本的最后一条（GLM 空收尾防护）
+				const c = j.message.content;
+				const text = Array.isArray(c) ? c.filter((p) => p.type === "text").map((p) => p.text).join("") : "";
+				if (text.trim()) bridge.answer = text.trim();
+			}
+		}
 	});
+	bridge.proc.stderr.on("data", () => {});
+	bridge.proc.on("close", () => {
+		bridge.alive = false;
+		for (const [, w] of bridge.pending) w({ success: false, data: { error: "pi 进程已退出" } });
+		bridge.pending.clear();
+		if (bridge.busy) bridge.busy = false;
+	});
+}
+
+function bridgeRequest(cmd, timeoutMs = 15 * 60_000) {
+	return new Promise((resolve) => {
+		const id = String(bridge.nextId++);
+		const t = setTimeout(() => { bridge.pending.delete(id); resolve({ success: false, data: { error: "请求超时" } }); }, timeoutMs);
+		bridge.pending.set(id, (r) => { clearTimeout(t); resolve(r); });
+		try { bridge.proc.stdin.write(JSON.stringify({ ...cmd, id }) + "\n"); }
+		catch (e) { clearTimeout(t); bridge.pending.delete(id); resolve({ success: false, data: { error: String(e?.message ?? e) } }); }
+	});
+}
+
+async function startRun(message, res) {
+	if (bridge.busy) return json(res, 409, { error: "已有任务在运行（可先终止）" });
+	bridgeStart();
+	bridge.busy = true; bridge.answer = ""; bridge.stream = ""; bridge.error = "";
+	// 立即受理，后台等 agent_settled（rpc 的 prompt 响应只代表受理，完成看事件）
+	settleWaiter = () => { bridge.busy = false; };
+	(async () => {
+		try {
+			const r = await bridgeRequest({ type: "prompt", message }, 14 * 60_000);
+			if (!r.success) { bridge.error = "请求被拒：" + JSON.stringify(r.data ?? r); bridge.busy = false; settleWaiter = null; return; }
+		} catch (e) { bridge.error = String(e?.message ?? e); bridge.busy = false; }
+	})();
+	json(res, 202, { accepted: true });
 }
 
 const server = http.createServer((req, res) => {
 	const url = new URL(req.url, "http://x");
+	if (req.method === "POST" && (url.pathname === "/abort" || url.pathname === "/new")) {
+		if (url.pathname === "/abort") { bridgeStart(); bridgeRequest({ type: "abort" }, 5000); return json(res, 200, { ok: true }); }
+		try { bridge.proc?.kill("SIGKILL"); } catch {}
+		bridge.alive = false; bridge.busy = false;
+		return json(res, 200, { ok: true });
+	}
 	if (req.method === "POST" && url.pathname === "/run") {
 		let body = "";
 		req.on("data", (c) => { body += c; if (body.length > 100_000) req.destroy(); });
@@ -130,6 +186,8 @@ const server = http.createServer((req, res) => {
 	if (url.pathname === "/" || url.pathname === "/index.html") {
 		res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
 		res.end(fs.readFileSync(path.join(here, "index.html")));
+	} else if (url.pathname === "/api/session") {
+		json(res, 200, { busy: bridge.busy, answer: bridge.answer || bridge.stream.trim(), stream: bridge.stream, alive: bridge.alive, error: bridge.error });
 	} else if (url.pathname === "/api/runs") {
 		json(res, 200, listRuns());
 	} else if (url.pathname.startsWith("/api/run/")) {
