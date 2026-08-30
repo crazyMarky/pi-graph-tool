@@ -128,6 +128,11 @@ function trace(ev) {
 	} catch {}
 }
 let traceStream = null; // null=未初始化 | false=不可用 | WriteStream=可用
+// 每次执行换新文件：进程可能长期存活（rpc 桥），多个 graph_run 不能挤进同一个 JSONL
+function traceReset() {
+	try { if (traceStream) traceStream.end(); } catch {}
+	traceStream = null; traceRunId = null;
+}
 
 // {{id}} 占位符：匹配 {{ research }} / {{n1}} 等；未命中任何节点 id 时原样保留
 const PLACEHOLDER_RE = /\{\{\s*([^{}\s]+)\s*\}\}/g;
@@ -307,6 +312,7 @@ export default function (pi) {
 		}),
 
 		async execute(toolCallId, params, signal, onUpdate) {
+			traceReset();
 			const agentDir = resolveAgentDir();
 			const modelOverride = resolveModel();
 			const t0 = Date.now();

@@ -55,6 +55,9 @@
 	#pasteGo { align-self: flex-start; }
 	.foot { color: var(--faint); font-size: 11px; padding: 5px 18px; border-top: 1px solid var(--line); background: var(--panel2); flex: none; }
 	#empty { color: var(--faint); text-align: center; margin-top: 90px; line-height: 2.2; }
+	#frozen { display: flex; flex-direction: column; gap: 18px; margin-bottom: 22px; }
+	.frozenRun { border: 1px dashed #24324e; border-radius: 14px; padding: 12px 14px 6px; opacity: .8; }
+	.frozenRun .fr-hd { font-size: 11px; color: var(--faint); letter-spacing: 1px; margin-bottom: 6px; }
 	#empty code { background: #16233c; padding: 2px 8px; border-radius: 6px; color: #93c5fd; }
 	/* 节点详情面板 */
 	#detail { display: none; position: absolute; top: 18px; right: 18px; width: 460px; max-height: calc(100% - 36px); overflow: auto; background: #0d1729; border: 1px solid #24385c; border-radius: 12px; box-shadow: 0 12px 40px #0009; z-index: 5; }
@@ -120,7 +123,9 @@
 <div id="stats"></div>
 <main>
 	<div id="canvasWrap">
-		<div id="empty">等待事件……<br>在上面输入框发一个任务，或任务侧设置 <code>PI_GRAPH_TRACE_DIR</code> 后调用 graph_run</div>
+		<div id="empty">等待事件……<br>在下方输入框发一个任务，或任务侧设置 <code>PI_GRAPH_TRACE_DIR</code> 后调用 graph_run</div>
+		<div id="frozen"></div>
+		<div id="live"></div>
 		<div id="detail"></div>
 	</div>
 	<aside>
@@ -145,7 +150,7 @@
 <script>
 "use strict";
 const S = { plan: null, node: new Map(), wave: [], t0: 0, done: null, runName: "" };
-let pendingUserMsg = null;
+let pendingUserMsg = null, round = 0;
 const $ = (s) => document.querySelector(s);
 const stat = (id) => S.node.get(id);
 const ICON = { pending: "○", running: "▶", ok: "✓", retry: "↻", failed: "✗", skipped: "⏭", user: "✎" };
@@ -153,7 +158,7 @@ const ICON = { pending: "○", running: "▶", ok: "✓", retry: "↻", failed: 
 function reset(runName) {
 	S.plan = null; S.node = new Map(); S.wave = []; S.t0 = 0; S.done = null; S.runName = runName || "";
 	$("#log").innerHTML = ""; $("#empty").style.display = "block";
-	$("#canvasWrap").querySelector("svg")?.remove(); $("#detail").style.display = "none";
+	$("#live").innerHTML = ""; $("#detail").style.display = "none";
 	renderStats();
 }
 function logLine(cls, label, rel) {
@@ -176,7 +181,7 @@ function applyEvent(ev) {
 					edges: [...ev.waves[0].map((id) => ({ from: "__user", to: id })), ...ev.edges] };
 				pendingUserMsg = null;
 			}
-			S.plan = ev; S.t0 = ev.ts;
+			S.plan = ev; S.t0 = ev.ts; round++;
 			for (const n of ev.nodes) S.node.set(n.id, { status: n.user ? "user" : "pending", prompt: n.prompt, profile: n });
 			S.wave = ev.waves.map((ids) => ({ ids, startTs: 0, endTs: 0, open: false }));
 			const inferred = new Set((ev.inferredEdges || []).map((e) => e.from + ">" + e.to));
@@ -231,6 +236,24 @@ function liveTick(id) {
 		if (b) { b.textContent = n.stream || "（等待首个增量…）"; b.scrollTop = b.scrollHeight; }
 	}
 }
+function freezeRun() {
+	const svg = $("#live").querySelector("svg");
+	if (!svg || !S.plan) return;
+	const ok = [...S.node.values()].filter((n) => n.status === "ok").length;
+	const div = document.createElement("div");
+	div.className = "frozenRun";
+	div.innerHTML = `<div class="fr-hd">第 ${round} 轮 · ${S.runName.slice(4, 19)} · ${ok}/${S.plan.nodes.length - (S.node.get("__user") ? 1 : 0)} 节点${S.done ? " · " + S.done.waveSeconds + "s" : ""}</div>`;
+	div.append(svg.cloneNode(true));
+	$("#frozen").append(div);
+	$("#live").innerHTML = "";
+}
+function drawPendingUser(message) {
+	$("#live").innerHTML = "";
+	const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+	svg.setAttribute("viewBox", "0 0 420 110"); svg.setAttribute("width", 420); svg.setAttribute("height", 110);
+	svg.innerHTML = `<g class="node st-user pulse"><rect x="20" y="20" width="380" height="70" rx="12" class="card"/><rect x="20" y="30" width="4" height="50" rx="2" class="accent"/><text x="38" y="46" class="n-icon">✎</text><text x="58" y="46" class="n-id">用户任务</text><text x="38" y="66" class="n-title">${message.slice(0, 24)}</text><text x="38" y="82" class="n-meta" fill="#c4b5fd">已提交 · 等待主 agent 规划…</text></g>`;
+	$("#live").append(svg);
+}
 function renderStats() {
 	const parts = [];
 	if (S.plan) {
@@ -240,6 +263,7 @@ function renderStats() {
 		parts.push(`Wave <b>${real.length ? S.plan.waves.length - 1 : S.plan.waves.length}</b>`);
 		const running = c("running") + c("retry") > 0;
 		parts.push(`墙钟 <b>${S.done ? S.done.waveSeconds + "s" : running ? "…" : "—"}</b>`);
+		if (round > 1) parts.push(`第 <b>${round}</b> 轮`);
 		if (S.runName) parts.push(`<span style="color:var(--faint)">${S.runName.slice(4, 19)}</span>`);
 	}
 	$("#stats").innerHTML = parts.map((p) => `<span class="chip">${p}</span>`).join("");
@@ -252,7 +276,7 @@ const W_CARD = 235, H_CARD = 74, COL_GAP = 120, ROW_GAP = 20;
 let layout = null;
 
 function render() {
-	$("#canvasWrap").querySelector("svg")?.remove();
+	$("#live").innerHTML = "";
 	if (!S.plan) return;
 	const cols = S.plan.waves.map((ids) => ids.map((id) => S.plan.nodes.find((n) => n.id === id)));
 	const colH = (n) => n * H_CARD + (n - 1) * ROW_GAP;
@@ -319,7 +343,7 @@ function render() {
 		g.addEventListener("click", () => showDetail(n));
 		svg.append(g);
 	}
-	$("#canvasWrap").append(svg);
+	$("#live").append(svg);
 }
 setInterval(() => {
 	for (const t of document.querySelectorAll("[data-live]")) {
@@ -344,7 +368,7 @@ function showDetail(n) {
 	const dep = (prof.dependsOn || []).join("、");
 	$("#detail").innerHTML = `
 		<div class="hd"><span>${ICON[st.status] || "○"}</span><b>${n.id}</b><span style="color:var(--dim)">${n.title}</span><span class="x" onclick="window.closeDetail()">✕</span></div>
-		<div class="sec"><h4>${n.user ? "用户提示词（图的起点）" : "输入 · PROMPT（{{id}} 运行前已替换为上游输出）"}</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
+		<div class="sec"><h4>${n.user ? "用户提示词（图的起点）" : "输入 · 该子代理收到的完整指令（其中 {{上游id}} 占位符已被替换为上游真实输出）"}</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
 		${st.status === "running" || st.status === "retry" ? `<div class="sec"><h4>过程 · 实时流${st.tools?.length ? `（工具：${st.tools.join(" → ")}）` : ""}</h4><div class="body" id="liveBody">${esc(st.stream || "（等待首个增量…）")}</div></div>` : ""}
 		${st.text ? `<div class="sec"><h4>产出 · 全文（共 ${st.chars} 字，${st.seconds}s${st.retried ? " · 重试挽回" : ""}）</h4><div class="body">${esc(st.text)}</div></div>` : ""}
 		${st.status === "skipped" || st.status === "failed" ? `<div class="sec"><h4>状态说明</h4><div class="body">${esc((st.reason || st.violReason || ""))}</div></div>` : ""}
@@ -358,7 +382,7 @@ $("#msg").addEventListener("keydown", (e) => {
 	if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#go").click(); }
 });
 $("#stop").onclick = () => { fetch("/abort", { method: "POST" }).catch(() => {}); $("#runState").textContent = "已发中止"; };
-$("#fresh").onclick = async () => { await fetch("/new", { method: "POST" }).catch(() => {}); $("#msg").value = ""; $("#runState").textContent = "新会话"; pendingUserMsg = null; reset(""); $("#empty").style.display = "block"; $("#empty").innerHTML = "新会话已开启<br>在下方输入框发一个任务，图将从用户提示词开始生长"; connectLive(true); };
+$("#fresh").onclick = async () => { await fetch("/new", { method: "POST" }).catch(() => {}); $("#msg").value = ""; $("#runState").textContent = "新会话"; pendingUserMsg = null; reset(""); round = 0; $("#frozen").innerHTML = ""; $("#empty").style.display = "block"; $("#empty").innerHTML = "新会话已开启<br>在下方输入框发一个任务，图将从用户提示词开始生长"; connectLive(true); };
 window.closeDetail = () => { $("#detail").style.display = "none"; curDetail = null; };
 $("#go").onclick = async () => {
 	const message = $("#msg").value.trim();
@@ -369,6 +393,9 @@ $("#go").onclick = async () => {
 		const r = await fetch("/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) });
 		const d = await r.json();
 		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); $("#go").disabled = false; pendingUserMsg = null; return; }
+		if (S.runName) { freezeRun(); reset(""); }
+		drawPendingUser(message);
+		$("#empty").style.display = "none";
 	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); $("#go").disabled = false; pendingUserMsg = null; return; }
 	// 轮询至完成：结果 = 最大 Wave 的完成节点产出，自动展开
 	const poll = setInterval(async () => {
@@ -401,8 +428,9 @@ function connectLive(freshOnly) {
 		try {
 			const ev = JSON.parse(m.data);
 			if (ev.t === "new_run") return;
-			if (ev.t === "plan" && S.runName && ev.run !== S.runName) reset(ev.run);
+			if (ev.t === "plan" && S.runName && ev.run !== S.runName) { freezeRun(); reset(ev.run); }
 			if (!S.runName && ev.run) { reset(ev.run); $("#dot").className = "dot live"; }
+			if (ev.t === "plan") { $("#canvasWrap").scrollTop = $("#canvasWrap").scrollHeight; }
 			applyEvent(ev);
 		} catch (e) { console.error("[graph-ui] 事件处理失败：", e); }
 	};
