@@ -341,7 +341,7 @@ export default function (pi) {
 			trace({
 				t: "plan",
 				nodes: nodes.map((n) => ({
-					id: n.id, title: n.title, wave: n.wave + 1, dependsOn: [...n.dependsOn],
+					id: n.id, title: n.title, wave: n.wave + 1, dependsOn: [...n.dependsOn], prompt: n.prompt,
 					tools: n.tools ?? [], minOutputChars: n.minOutputChars ?? MIN_OUTPUT_CHARS, outputCap: n.outputCap ?? OUTPUT_CAP, workdir: n.workdir,
 				})),
 				waves: waves.map((wave) => wave.map((n) => n.id)),

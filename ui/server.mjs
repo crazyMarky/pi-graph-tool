@@ -199,8 +199,13 @@ const server = http.createServer((req, res) => {
 		res.end(fs.readFileSync(full, "utf8"));
 	} else if (url.pathname === "/events") {
 		const pinned = url.searchParams.get("run");
+		const freshOnly = url.searchParams.get("new") === "1";
 		const runs = listRuns();
-		const file = pinned && /^[\w.-]+\.jsonl$/.test(pinned) ? pinned : (runs[0]?.name ?? "");
+		const eligible = freshOnly ? runs.filter((r) => r.mtime >= Date.now() - 2000) : runs;
+		let file = "";
+		if (pinned && /^[\w.-]+\.jsonl$/.test(pinned)) file = pinned;
+		else if (eligible[0]) file = eligible[0].name;
+		else if (!freshOnly && runs[0]) file = runs[0].name;
 		if (!file) {
 			res.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache" });
 			res.write("retry: 3000\n\n");

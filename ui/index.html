@@ -24,18 +24,12 @@
 	.dot.live { background: var(--green); box-shadow: 0 0 8px var(--green); }
 	.dot.wait { background: var(--amber); }
 	/* 输入框 */
-	#inputBar { display: flex; gap: 10px; padding: 10px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex: none; align-items: flex-end; }
+	#inputBar { display: flex; gap: 10px; padding: 10px 18px; background: var(--panel2); border-top: 1px solid var(--line); flex: none; align-items: flex-end; }
 	#inputBar textarea { flex: 1; background: #0a1120; color: var(--txt); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font: 13px/1.5 inherit; resize: none; height: 42px; max-height: 120px; outline: none; }
 	#inputBar textarea:focus { border-color: #2f4d7a; }
 	#go { padding: 9px 22px; border-radius: 10px; font-weight: 700; background: linear-gradient(135deg, #1d4ed8, #2563eb); border: none; color: #fff; cursor: pointer; }
 	#go:disabled { opacity: .45; cursor: wait; }
 	#runState { font-size: 12px; color: var(--dim); min-width: 90px; text-align: right; }
-	/* 回答面板 */
-	#answerWrap { display: none; flex: none; margin: 0 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel2); }
-	#answerWrap summary { cursor: pointer; padding: 8px 14px; color: var(--dim); font-size: 12px; list-style: none; }
-	#answerWrap summary::before { content: "▸ "; }
-	#answerWrap[open] summary::before { content: "▾ "; }
-	#answerBody { padding: 0 14px 12px; max-height: 200px; overflow: auto; white-space: pre-wrap; font-size: 12.5px; color: var(--txt); border-top: 1px dashed var(--line); padding-top: 10px; }
 	#stats { display: flex; gap: 8px; padding: 8px 18px; background: var(--panel2); border-bottom: 1px solid var(--line); flex-wrap: wrap; flex: none; }
 	.chip { background: #16233c; border: 1px solid #274066; border-radius: 20px; padding: 2px 12px; font-size: 12px; color: var(--dim); }
 	.chip b { color: var(--txt); font-weight: 700; }
@@ -97,6 +91,9 @@
 	g.st-skipped rect.card { fill: #0f1626; stroke: #2b3a52; stroke-dasharray: 3 3; }
 	g.st-skipped rect.accent { fill: #2b3a52; }
 	g.st-skipped .n-title, g.st-skipped .n-id { opacity: .5; }
+	g.st-user rect.card { fill: #171433; stroke: var(--violet); }
+	g.st-user rect.accent { fill: var(--violet); }
+	g.st-user .n-id { fill: #c4b5fd; }
 	.n-icon { font-size: 13px; }
 	.n-id { font-weight: 700; font-size: 13.5px; fill: var(--txt); }
 	g.st-running .n-id { fill: #93c5fd; } g.st-ok .n-id { fill: #6ee7b7; }
@@ -120,14 +117,6 @@
 	</tabs>
 	<div class="dot" id="dot" title="连接状态"></div>
 </header>
-<div id="inputBar">
-	<textarea id="msg" placeholder="输入任务（如：帮我调研 React、Vue、Svelte 三个框架，然后对比汇总）→ 回车运行，下方实时长图"></textarea>
-	<button id="go">运行 ▶</button>
-	<button id="stop" title="中止当前任务" style="padding:9px 12px">⏹</button>
-	<button id="fresh" title="重开新会话（清空对话）" style="padding:9px 12px">✚新会话</button>
-	<div id="runState">空闲</div>
-</div>
-<details id="answerWrap"><summary>最终回答（任务完成后展开）</summary><div id="answerBody"></div></details>
 <div id="stats"></div>
 <main>
 	<div id="canvasWrap">
@@ -144,14 +133,22 @@
 		</div>
 	</aside>
 </main>
+<div id="inputBar">
+	<textarea id="msg" placeholder="输入任务（如：帮我调研 React、Vue、Svelte 三个框架，然后对比汇总）→ 回车运行，下方实时长图"></textarea>
+	<button id="go">运行 ▶</button>
+	<button id="stop" title="中止当前任务" style="padding:9px 12px">⏹</button>
+	<button id="fresh" title="重开新会话（清空对话）" style="padding:9px 12px">✚新会话</button>
+	<div id="runState">空闲</div>
+</div>
 <div class="foot">数据源：PI_GRAPH_TRACE_DIR JSONL 事件流 · 点击节点可查看该节点的输入与产出 · 服务器：<code>node ui/server.mjs</code></div>
 
 <script>
 "use strict";
 const S = { plan: null, node: new Map(), wave: [], t0: 0, done: null, runName: "" };
+let pendingUserMsg = null;
 const $ = (s) => document.querySelector(s);
 const stat = (id) => S.node.get(id);
-const ICON = { pending: "○", running: "▶", ok: "✓", retry: "↻", failed: "✗", skipped: "⏭" };
+const ICON = { pending: "○", running: "▶", ok: "✓", retry: "↻", failed: "✗", skipped: "⏭", user: "✎" };
 
 function reset(runName) {
 	S.plan = null; S.node = new Map(); S.wave = []; S.t0 = 0; S.done = null; S.runName = runName || "";
@@ -172,8 +169,15 @@ function applyEvent(ev) {
 	const rel = S.t0 ? ev.ts - S.t0 : 0;
 	switch (ev.t) {
 		case "plan": {
+			// 页面发起的任务：把用户提示词作为根节点（wave 0），连向第一波全部节点
+			if (pendingUserMsg) {
+				ev = { ...ev, nodes: [{ id: "__user", title: "用户任务", wave: 0, dependsOn: [], user: true }, ...ev.nodes],
+					waves: [["__user"], ...ev.waves],
+					edges: [...ev.waves[0].map((id) => ({ from: "__user", to: id })), ...ev.edges] };
+				pendingUserMsg = null;
+			}
 			S.plan = ev; S.t0 = ev.ts;
-			for (const n of ev.nodes) S.node.set(n.id, { status: "pending", prompt: n.prompt, profile: n });
+			for (const n of ev.nodes) S.node.set(n.id, { status: n.user ? "user" : "pending", prompt: n.prompt, profile: n });
 			S.wave = ev.waves.map((ids) => ({ ids, startTs: 0, endTs: 0, open: false }));
 			const inferred = new Set((ev.inferredEdges || []).map((e) => e.from + ">" + e.to));
 			S.plan.edgeKind = new Map(ev.edges.map((e) => [e.from + ">" + e.to, inferred.has(e.from + ">" + e.to) ? "inferred" : "explicit"]));
@@ -230,9 +234,10 @@ function liveTick(id) {
 function renderStats() {
 	const parts = [];
 	if (S.plan) {
-		const c = (s) => [...S.node.values()].filter((n) => n.status === s).length;
-		parts.push(`节点 <b>${c("ok")}</b> ok / ${S.plan.nodes.length}` + (c("failed") ? ` · <b>${c("failed")}</b> 失败` : "") + (c("skipped") ? ` · <b>${c("skipped")}</b> 跳过` : ""));
-		parts.push(`Wave <b>${S.plan.waves.length}</b>`);
+		const real = S.plan.nodes.filter((n) => !n.user);
+		const c = (s) => real.filter((n) => (S.node.get(n.id) || {}).status === s).length;
+		parts.push(`节点 <b>${c("ok")}</b> ok / ${real.length}` + (c("failed") ? ` · <b>${c("failed")}</b> 失败` : "") + (c("skipped") ? ` · <b>${c("skipped")}</b> 跳过` : ""));
+		parts.push(`Wave <b>${real.length ? S.plan.waves.length - 1 : S.plan.waves.length}</b>`);
 		const running = c("running") + c("retry") > 0;
 		parts.push(`墙钟 <b>${S.done ? S.done.waveSeconds + "s" : running ? "…" : "—"}</b>`);
 		if (S.runName) parts.push(`<span style="color:var(--faint)">${S.runName.slice(4, 19)}</span>`);
@@ -265,7 +270,7 @@ function render() {
 		const totalH = colH(col.length);
 		const waveOpen = S.wave[ci]?.open;
 		svg.append(el("rect", { x: x - 24, y: 44, width: W_CARD + 48, height: totalH + 56, rx: 14, fill: waveOpen ? "#0e1c33" : "#0d1526", stroke: waveOpen ? "#274066" : "#152238" }));
-		svg.append(el("text", { x, y: 66, class: "wave-label" }, `WAVE ${ci + 1}`));
+		svg.append(el("text", { x, y: 66, class: "wave-label" }, ci === 0 && S.plan.waves[0][0] === "__user" ? "用户" : `WAVE ${S.plan.waves.length > 1 && S.plan.waves[0][0] === "__user" ? ci : ci + 1}`));
 		svg.append(el("text", { x, y: 82, class: "wave-sub" }, waveOpen ? `${col.length} 节点 · 运行中` : `${col.length} 节点`));
 		col.forEach((n, ri) => {
 			const y = 104 + (H - 140 - totalH) / 2 + ri * (H_CARD + ROW_GAP);
@@ -339,7 +344,7 @@ function showDetail(n) {
 	const dep = (prof.dependsOn || []).join("、");
 	$("#detail").innerHTML = `
 		<div class="hd"><span>${ICON[st.status] || "○"}</span><b>${n.id}</b><span style="color:var(--dim)">${n.title}</span><span class="x" onclick="window.closeDetail()">✕</span></div>
-		<div class="sec"><h4>输入 · PROMPT（{{id}} 运行前已替换为上游输出）</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
+		<div class="sec"><h4>${n.user ? "用户提示词（图的起点）" : "输入 · PROMPT（{{id}} 运行前已替换为上游输出）"}</h4><div class="body">${esc((st.prompt || n.prompt || "").trim())}</div></div>
 		${st.status === "running" || st.status === "retry" ? `<div class="sec"><h4>过程 · 实时流${st.tools?.length ? `（工具：${st.tools.join(" → ")}）` : ""}</h4><div class="body" id="liveBody">${esc(st.stream || "（等待首个增量…）")}</div></div>` : ""}
 		${st.text ? `<div class="sec"><h4>产出 · 全文（共 ${st.chars} 字，${st.seconds}s${st.retried ? " · 重试挽回" : ""}）</h4><div class="body">${esc(st.text)}</div></div>` : ""}
 		${st.status === "skipped" || st.status === "failed" ? `<div class="sec"><h4>状态说明</h4><div class="body">${esc((st.reason || st.violReason || ""))}</div></div>` : ""}
@@ -353,33 +358,43 @@ $("#msg").addEventListener("keydown", (e) => {
 	if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("#go").click(); }
 });
 $("#stop").onclick = () => { fetch("/abort", { method: "POST" }).catch(() => {}); $("#runState").textContent = "已发中止"; };
-$("#fresh").onclick = async () => { await fetch("/new", { method: "POST" }).catch(() => {}); $("#answerWrap").style.display = "none"; $("#runState").textContent = "新会话"; reset(""); connectLive(); };
+$("#fresh").onclick = async () => { await fetch("/new", { method: "POST" }).catch(() => {}); $("#msg").value = ""; $("#runState").textContent = "新会话"; pendingUserMsg = null; reset(""); $("#empty").style.display = "block"; $("#empty").innerHTML = "新会话已开启<br>在下方输入框发一个任务，图将从用户提示词开始生长"; connectLive(true); };
 window.closeDetail = () => { $("#detail").style.display = "none"; curDetail = null; };
 $("#go").onclick = async () => {
 	const message = $("#msg").value.trim();
 	if (!message) return;
 	$("#go").disabled = true; $("#runState").textContent = "运行中…";
-	$("#answerWrap").style.display = "block"; $("#answerWrap").open = true;
-	$("#answerBody").textContent = "…";
-	const poll = setInterval(async () => {
-		try {
-			const s2 = await (await fetch("/api/session")).json();
-			if (s2.stream) { $("#answerBody").textContent = s2.stream; $("#answerBody").scrollTop = 1e6; }
-		} catch {}
-	}, 900);
-	setTimeout(() => clearInterval(poll), 15 * 60_000);
+	pendingUserMsg = message;
 	try {
 		const r = await fetch("/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message }) });
 		const d = await r.json();
-		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); $("#go").disabled = false; return; }
-	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); $("#go").disabled = false; }
+		if (d.error) { $("#runState").textContent = "失败"; alert(d.error); $("#go").disabled = false; pendingUserMsg = null; return; }
+	} catch (e) { $("#runState").textContent = "错误"; alert("请求失败：" + e.message); $("#go").disabled = false; pendingUserMsg = null; return; }
+	// 轮询至完成：结果 = 最大 Wave 的完成节点产出，自动展开
+	const poll = setInterval(async () => {
+		try {
+			const s2 = await (await fetch("/api/session")).json();
+			$("#runState").textContent = s2.busy ? "运行中…" : "完成";
+			if (!s2.busy) {
+				clearInterval(poll); $("#go").disabled = false;
+				if (s2.error) { $("#runState").textContent = "出错"; alert(s2.error); return; }
+				const okNodes = S.plan?.nodes.filter((n) => !n.user && stat(n.id)?.status === "ok") ?? [];
+				if (okNodes.length) {
+					const last = okNodes.reduce((a, b) => (b.wave >= a.wave ? b : a));
+					document.querySelector(`g.node[data-id="${last.id}"]`)?.scrollIntoView({ block: "center", inline: "center" });
+					showDetail(last);
+				}
+			}
+		} catch {}
+	}, 900);
+	setTimeout(() => clearInterval(poll), 15 * 60_000);
 };
 
 // ============ 视图切换 / 实时 / 历史 / 粘贴 ============
 let es = null, lastEvents = null;
-function connectLive() {
+function connectLive(freshOnly) {
 	es?.close();
-	es = new EventSource("/events");
+	es = new EventSource("/events" + (freshOnly ? "?new=1" : ""));
 	es.onopen = () => { $("#dot").className = "dot live"; };
 	es.onerror = () => { $("#dot").className = "dot wait"; };
 	es.onmessage = (m) => {
@@ -458,7 +473,7 @@ document.querySelectorAll(".tab").forEach((tab) => {
 		$("#asideTitle").childNodes[0].textContent = m === "live" ? "事件流 " : m === "history" ? "历史 run " : "离线回放 ";
 		if (m !== "live") $("#replayBtn").style.display = "";
 		if (m === "history") loadHistory();
-		if (m === "live") { es?.close(); reset(""); connectLive(); $("#replayBtn").style.display = "none"; lastEvents = null; }
+		if (m === "live") { es?.close(); reset(""); connectLive(false); $("#replayBtn").style.display = "none"; lastEvents = null; }
 	};
 });
 connectLive();
